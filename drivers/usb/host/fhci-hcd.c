@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Freescale QUICC Engine USB Host Controller Driver
  *
@@ -8,11 +9,6 @@
  *               Peter Barada <peterb@logicpd.com>
  * Copyright (c) MontaVista Software, Inc. 2008.
  *               Anton Vorontsov <avorontsov@ru.mvista.com>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/module.h>
@@ -400,6 +396,7 @@ static int fhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb,
 	case PIPE_CONTROL:
 		/* 1 td fro setup,1 for ack */
 		size = 2;
+		fallthrough;
 	case PIPE_BULK:
 		/* one td for every 4096 bytes(can be up to 8k) */
 		size += urb->transfer_buffer_length / 4096;
@@ -411,8 +408,7 @@ static int fhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb,
 			size++;
 		else if ((urb->transfer_flags & URB_ZERO_PACKET) != 0
 			 && (urb->transfer_buffer_length
-			     % usb_maxpacket(urb->dev, pipe,
-					     usb_pipeout(pipe))) != 0)
+			     % usb_maxpacket(urb->dev, pipe)) != 0)
 			size++;
 		break;
 	case PIPE_ISOCHRONOUS:
@@ -542,7 +538,7 @@ static const struct hc_driver fhci_driver = {
 
 	/* generic hardware linkage */
 	.irq = fhci_irq,
-	.flags = HCD_USB11 | HCD_MEMORY,
+	.flags = HCD_DMA | HCD_USB11 | HCD_MEMORY,
 
 	/* basic lifecycle operation */
 	.start = fhci_start,

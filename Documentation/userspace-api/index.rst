@@ -16,7 +16,19 @@ place where this information is gathered.
 .. toctree::
    :maxdepth: 2
 
+   no_new_privs
+   seccomp_filter
+   landlock
    unshare
+   spec_ctrl
+   accelerators/ocxl
+   ebpf/index
+   ioctl/index
+   iommu
+   media/index
+   sysfs-platform_profile
+   vduse
+   futex2
 
 .. only::  subproject and html
 

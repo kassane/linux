@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_IA64_UACCESS_H
 #define _ASM_IA64_UACCESS_H
 
@@ -34,39 +35,27 @@
 
 #include <linux/compiler.h>
 #include <linux/page-flags.h>
-#include <linux/mm.h>
 
 #include <asm/intrinsics.h>
-#include <asm/pgtable.h>
+#include <linux/pgtable.h>
 #include <asm/io.h>
 #include <asm/extable.h>
 
 /*
- * For historical reasons, the following macros are grossly misnamed:
- */
-#define KERNEL_DS	((mm_segment_t) { ~0UL })		/* cf. access_ok() */
-#define USER_DS		((mm_segment_t) { TASK_SIZE-1 })	/* cf. access_ok() */
-
-#define get_ds()  (KERNEL_DS)
-#define get_fs()  (current_thread_info()->addr_limit)
-#define set_fs(x) (current_thread_info()->addr_limit = (x))
-
-#define segment_eq(a, b)	((a).seg == (b).seg)
-
-/*
- * When accessing user memory, we need to make sure the entire area really is in
- * user-level space.  In order to do this efficiently, we make sure that the page at
- * address TASK_SIZE is never valid.  We also need to make sure that the address doesn't
+ * When accessing user memory, we need to make sure the entire area really is
+ * in user-level space.  We also need to make sure that the address doesn't
  * point inside the virtually mapped linear page table.
  */
 static inline int __access_ok(const void __user *p, unsigned long size)
 {
+	unsigned long limit = TASK_SIZE;
 	unsigned long addr = (unsigned long)p;
-	unsigned long seg = get_fs().seg;
-	return likely(addr <= seg) &&
-	 (seg == KERNEL_DS.seg || likely(REGION_OFFSET(addr) < RGN_MAP_LIMIT));
+
+	return likely((size <= limit) && (addr <= (limit - size)) &&
+		 likely(REGION_OFFSET(addr) < RGN_MAP_LIMIT));
 }
-#define access_ok(type, addr, size)	__access_ok((addr), (size))
+#define __access_ok __access_ok
+#include <asm-generic/access_ok.h>
 
 /*
  * These are the main single-value transfer routines.  They automatically
@@ -86,42 +75,6 @@ static inline int __access_ok(const void __user *p, unsigned long size)
  */
 #define __put_user(x, ptr)	__put_user_nocheck((__typeof__(*(ptr))) (x), (ptr), sizeof(*(ptr)))
 #define __get_user(x, ptr)	__get_user_nocheck((x), (ptr), sizeof(*(ptr)))
-
-extern long __put_user_unaligned_unknown (void);
-
-#define __put_user_unaligned(x, ptr)								\
-({												\
-	long __ret;										\
-	switch (sizeof(*(ptr))) {								\
-		case 1: __ret = __put_user((x), (ptr)); break;					\
-		case 2: __ret = (__put_user((x), (u8 __user *)(ptr)))				\
-			| (__put_user((x) >> 8, ((u8 __user *)(ptr) + 1))); break;		\
-		case 4: __ret = (__put_user((x), (u16 __user *)(ptr)))				\
-			| (__put_user((x) >> 16, ((u16 __user *)(ptr) + 1))); break;		\
-		case 8: __ret = (__put_user((x), (u32 __user *)(ptr)))				\
-			| (__put_user((x) >> 32, ((u32 __user *)(ptr) + 1))); break;		\
-		default: __ret = __put_user_unaligned_unknown();				\
-	}											\
-	__ret;											\
-})
-
-extern long __get_user_unaligned_unknown (void);
-
-#define __get_user_unaligned(x, ptr)								\
-({												\
-	long __ret;										\
-	switch (sizeof(*(ptr))) {								\
-		case 1: __ret = __get_user((x), (ptr)); break;					\
-		case 2: __ret = (__get_user((x), (u8 __user *)(ptr)))				\
-			| (__get_user((x) >> 8, ((u8 __user *)(ptr) + 1))); break;		\
-		case 4: __ret = (__get_user((x), (u16 __user *)(ptr)))				\
-			| (__get_user((x) >> 16, ((u16 __user *)(ptr) + 1))); break;		\
-		case 8: __ret = (__get_user((x), (u32 __user *)(ptr)))				\
-			| (__get_user((x) >> 32, ((u32 __user *)(ptr) + 1))); break;		\
-		default: __ret = __get_user_unaligned_unknown();				\
-	}											\
-	__ret;											\
-})
 
 #ifdef ASM_SUPPORTED
   struct __large_struct { unsigned long buf[100]; };
@@ -277,18 +230,6 @@ extern long __must_check __strncpy_from_user (char *to, const char __user *from,
 	__sfu_ret;							\
 })
 
-/* Returns: 0 if bad, string length+1 (memory size) of string if ok */
-extern unsigned long __strlen_user (const char __user *);
-
-#define strlen_user(str)				\
-({							\
-	const char __user *__su_str = (str);		\
-	unsigned long __su_ret = 0;			\
-	if (__access_ok(__su_str, 0))			\
-		__su_ret = __strlen_user(__su_str);	\
-	__su_ret;					\
-})
-
 /*
  * Returns: 0 if exception before NUL or reaching the supplied limit
  * (N), a value greater than N if the limit would be exceeded, else
@@ -317,24 +258,6 @@ xlate_dev_mem_ptr(phys_addr_t p)
 		ptr = (void *)p + __IA64_UNCACHED_OFFSET;
 	else
 		ptr = __va(p);
-
-	return ptr;
-}
-
-/*
- * Convert a virtual cached kernel memory pointer to an uncached pointer
- */
-static __inline__ void *
-xlate_dev_kmem_ptr(void *p)
-{
-	struct page *page;
-	void *ptr;
-
-	page = virt_to_page((unsigned long)p);
-	if (PageUncached(page))
-		ptr = (void *)__pa(p) + __IA64_UNCACHED_OFFSET;
-	else
-		ptr = p;
 
 	return ptr;
 }

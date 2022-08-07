@@ -1,16 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright (c) 2010 Sascha Hauer <s.hauer@pengutronix.de>
  * Copyright (C) 2005-2009 Freescale Semiconductor, Inc.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- * or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * for more details.
  */
 #ifndef __IPU_PRV_H__
 #define __IPU_PRV_H__
@@ -157,11 +148,8 @@ enum ipu_modules {
 
 struct ipuv3_channel {
 	unsigned int num;
-
-	bool enabled;
-	bool busy;
-
 	struct ipu_soc *ipu;
+	struct list_head list;
 };
 
 struct ipu_cpmem;
@@ -184,6 +172,7 @@ struct ipu_soc {
 	enum ipuv3_type		ipu_type;
 	spinlock_t		lock;
 	struct mutex		channel_lock;
+	struct list_head	channels;
 
 	void __iomem		*cm_reg;
 	void __iomem		*idmac_reg;
@@ -192,8 +181,6 @@ struct ipu_soc {
 	int			usecount;
 
 	struct clk		*clk;
-
-	struct ipuv3_channel	channel[64];
 
 	int			irq_sync;
 	int			irq_err;
@@ -229,7 +216,6 @@ int ipu_module_enable(struct ipu_soc *ipu, u32 mask);
 int ipu_module_disable(struct ipu_soc *ipu, u32 mask);
 
 bool ipu_idmac_channel_busy(struct ipu_soc *ipu, unsigned int chno);
-int ipu_wait_interrupt(struct ipu_soc *ipu, int irq, int ms);
 
 int ipu_csi_init(struct ipu_soc *ipu, struct device *dev, int id,
 		 unsigned long base, u32 module, struct clk *clk_ipu);
@@ -274,9 +260,10 @@ int ipu_pre_get(struct ipu_pre *pre);
 void ipu_pre_put(struct ipu_pre *pre);
 u32 ipu_pre_get_baddr(struct ipu_pre *pre);
 void ipu_pre_configure(struct ipu_pre *pre, unsigned int width,
-		       unsigned int height,
-		       unsigned int stride, u32 format, unsigned int bufaddr);
+		       unsigned int height, unsigned int stride, u32 format,
+		       uint64_t modifier, unsigned int bufaddr);
 void ipu_pre_update(struct ipu_pre *pre, unsigned int bufaddr);
+bool ipu_pre_update_pending(struct ipu_pre *pre);
 
 struct ipu_prg *ipu_prg_lookup_by_phandle(struct device *dev, const char *name,
 					  int ipu_id);

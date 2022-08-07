@@ -22,6 +22,7 @@
 #include "octeon_iq.h"
 #include "response_manager.h"
 #include "octeon_device.h"
+#include "octeon_mem_ops.h"
 
 #define MEMOPS_IDX   BAR1_INDEX_DYNAMIC_MAP
 
@@ -167,10 +168,10 @@ octeon_pci_read_core_mem(struct octeon_device *oct,
 void
 octeon_pci_write_core_mem(struct octeon_device *oct,
 			  u64 coreaddr,
-			  u8 *buf,
+			  const u8 *buf,
 			  u32 len)
 {
-	__octeon_pci_rw_core_mem(oct, coreaddr, buf, len, 0);
+	__octeon_pci_rw_core_mem(oct, coreaddr, (u8 *)buf, len, 0);
 }
 
 u64 octeon_read_device_mem64(struct octeon_device *oct, u64 coreaddr)

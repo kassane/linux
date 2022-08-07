@@ -24,6 +24,7 @@
 #include <core/ioctl.h>
 #include <core/client.h>
 #include <core/engine.h>
+#include <core/event.h>
 
 #include <nvif/unpack.h>
 #include <nvif/ioctl.h>
@@ -53,7 +54,7 @@ nvkm_ioctl_sclass(struct nvkm_client *client,
 	union {
 		struct nvif_ioctl_sclass_v0 v0;
 	} *args = data;
-	struct nvkm_oclass oclass;
+	struct nvkm_oclass oclass = { .client = client };
 	int ret = -ENOSYS, i = 0;
 
 	nvif_ioctl(object, "sclass size %d\n", size);
@@ -128,7 +129,7 @@ nvkm_ioctl_new(struct nvkm_client *client,
 	if (ret == 0) {
 		ret = nvkm_object_init(object);
 		if (ret == 0) {
-			list_add(&object->head, &parent->tree);
+			list_add_tail(&object->head, &parent->tree);
 			if (nvkm_object_insert(object)) {
 				client->data = object;
 				return 0;
@@ -257,13 +258,19 @@ nvkm_ioctl_map(struct nvkm_client *client,
 	union {
 		struct nvif_ioctl_map_v0 v0;
 	} *args = data;
+	enum nvkm_object_map type;
 	int ret = -ENOSYS;
 
 	nvif_ioctl(object, "map size %d\n", size);
-	if (!(ret = nvif_unpack(ret, &data, &size, args->v0, 0, 0, false))) {
+	if (!(ret = nvif_unpack(ret, &data, &size, args->v0, 0, 0, true))) {
 		nvif_ioctl(object, "map vers %d\n", args->v0.version);
-		ret = nvkm_object_map(object, &args->v0.handle,
-					      &args->v0.length);
+		ret = nvkm_object_map(object, data, size, &type,
+				      &args->v0.handle,
+				      &args->v0.length);
+		if (type == NVKM_OBJECT_MAP_IO)
+			args->v0.type = NVIF_IOCTL_MAP_V0_IO;
+		else
+			args->v0.type = NVIF_IOCTL_MAP_V0_VA;
 	}
 
 	return ret;
@@ -281,6 +288,7 @@ nvkm_ioctl_unmap(struct nvkm_client *client,
 	nvif_ioctl(object, "unmap size %d\n", size);
 	if (!(ret = nvif_unvers(ret, &data, &size, args->none))) {
 		nvif_ioctl(object, "unmap\n");
+		ret = nvkm_object_unmap(object);
 	}
 
 	return ret;
@@ -419,8 +427,7 @@ nvkm_ioctl_path(struct nvkm_client *client, u64 handle, u32 type,
 }
 
 int
-nvkm_ioctl(struct nvkm_client *client, bool supervisor,
-	   void *data, u32 size, void **hack)
+nvkm_ioctl(struct nvkm_client *client, void *data, u32 size, void **hack)
 {
 	struct nvkm_object *object = &client->object;
 	union {
@@ -428,7 +435,6 @@ nvkm_ioctl(struct nvkm_client *client, bool supervisor,
 	} *args = data;
 	int ret = -ENOSYS;
 
-	client->super = supervisor;
 	nvif_ioctl(object, "size %d\n", size);
 
 	if (!(ret = nvif_unpack(ret, &data, &size, args->v0, 0, 0, true))) {

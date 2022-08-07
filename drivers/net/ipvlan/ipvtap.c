@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/etherdevice.h>
 #include "ipvlan.h"
 #include <linux/if_vlan.h>
@@ -24,7 +25,7 @@
 #include <linux/virtio_net.h>
 
 #define TUN_OFFLOADS (NETIF_F_HW_CSUM | NETIF_F_TSO_ECN | NETIF_F_TSO | \
-		      NETIF_F_TSO6 | NETIF_F_UFO)
+		      NETIF_F_TSO6)
 
 static dev_t ipvtap_major;
 static struct cdev ipvtap_cdev;
@@ -73,10 +74,9 @@ static void ipvtap_update_features(struct tap_dev *tap,
 	netdev_update_features(vlan->dev);
 }
 
-static int ipvtap_newlink(struct net *src_net,
-			  struct net_device *dev,
-			  struct nlattr *tb[],
-			  struct nlattr *data[])
+static int ipvtap_newlink(struct net *src_net, struct net_device *dev,
+			  struct nlattr *tb[], struct nlattr *data[],
+			  struct netlink_ext_ack *extack)
 {
 	struct ipvtap_dev *vlantap = netdev_priv(dev);
 	int err;
@@ -98,7 +98,7 @@ static int ipvtap_newlink(struct net *src_net,
 	/* Don't put anything that may fail after macvlan_common_newlink
 	 * because we can't undo what it does.
 	 */
-	err =  ipvlan_link_new(src_net, dev, tb, data);
+	err =  ipvlan_link_new(src_net, dev, tb, data, extack);
 	if (err) {
 		netdev_rx_handler_unregister(dev);
 		return err;
@@ -162,7 +162,7 @@ static int ipvtap_device_event(struct notifier_block *unused,
 
 		devt = MKDEV(MAJOR(ipvtap_major), vlantap->tap.minor);
 		classdev = device_create(&ipvtap_class, &dev->dev, devt,
-					 dev, tap_name);
+					 dev, "%s", tap_name);
 		if (IS_ERR(classdev)) {
 			tap_free_minor(ipvtap_major, &vlantap->tap);
 			return notifier_from_errno(PTR_ERR(classdev));
@@ -198,8 +198,8 @@ static int ipvtap_init(void)
 {
 	int err;
 
-	err = tap_create_cdev(&ipvtap_cdev, &ipvtap_major, "ipvtap");
-
+	err = tap_create_cdev(&ipvtap_cdev, &ipvtap_major, "ipvtap",
+			      THIS_MODULE);
 	if (err)
 		goto out1;
 

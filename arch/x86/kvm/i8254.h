@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __I8254_H
 #define __I8254_H
 
@@ -28,7 +29,6 @@ struct kvm_kpit_state {
 	bool is_periodic;
 	s64 period; 				/* unit: ns */
 	struct hrtimer timer;
-	u32    speaker_data_on;
 
 	struct mutex lock;
 	atomic_t reinject;

@@ -156,20 +156,10 @@ static inline void timer_ack(void)
 static irqreturn_t timer_interrupt(int irq, void *dev_id)
 {
 	struct clock_event_device *evt = &clockevent_xilinx_timer;
-#ifdef CONFIG_HEART_BEAT
-	microblaze_heartbeat();
-#endif
 	timer_ack();
 	evt->event_handler(evt);
 	return IRQ_HANDLED;
 }
-
-static struct irqaction timer_irqaction = {
-	.handler = timer_interrupt,
-	.flags = IRQF_TIMER,
-	.name = "timer",
-	.dev_id = &clockevent_xilinx_timer,
-};
 
 static __init int xilinx_clockevent_init(void)
 {
@@ -178,8 +168,10 @@ static __init int xilinx_clockevent_init(void)
 				clockevent_xilinx_timer.shift);
 	clockevent_xilinx_timer.max_delta_ns =
 		clockevent_delta2ns((u32)~0, &clockevent_xilinx_timer);
+	clockevent_xilinx_timer.max_delta_ticks = (u32)~0;
 	clockevent_xilinx_timer.min_delta_ns =
 		clockevent_delta2ns(1, &clockevent_xilinx_timer);
+	clockevent_xilinx_timer.min_delta_ticks = 1;
 	clockevent_xilinx_timer.cpumask = cpumask_of(0);
 	clockevents_register_device(&clockevent_xilinx_timer);
 
@@ -259,6 +251,10 @@ static int __init xilinx_timer_init(struct device_node *timer)
 	u32 timer_num = 1;
 	int ret;
 
+	/* If this property is present, the device is a PWM and not a timer */
+	if (of_property_read_bool(timer, "#pwm-cells"))
+		return 0;
+
 	if (initialized)
 		return -EINVAL;
 
@@ -291,7 +287,7 @@ static int __init xilinx_timer_init(struct device_node *timer)
 		return -EINVAL;
 	}
 
-	pr_info("%s: irq=%d\n", timer->full_name, irq);
+	pr_info("%pOF: irq=%d\n", timer, irq);
 
 	clk = of_clk_get(timer, 0);
 	if (IS_ERR(clk)) {
@@ -310,15 +306,12 @@ static int __init xilinx_timer_init(struct device_node *timer)
 
 	freq_div_hz = timer_clock_freq / HZ;
 
-	ret = setup_irq(irq, &timer_irqaction);
+	ret = request_irq(irq, timer_interrupt, IRQF_TIMER, "timer",
+			  &clockevent_xilinx_timer);
 	if (ret) {
 		pr_err("Failed to setup IRQ");
 		return ret;
 	}
-
-#ifdef CONFIG_HEART_BEAT
-	microblaze_setup_heartbeat();
-#endif
 
 	ret = xilinx_clocksource_init();
 	if (ret)
@@ -333,5 +326,5 @@ static int __init xilinx_timer_init(struct device_node *timer)
 	return 0;
 }
 
-CLOCKSOURCE_OF_DECLARE(xilinx_timer, "xlnx,xps-timer-1.00.a",
+TIMER_OF_DECLARE(xilinx_timer, "xlnx,xps-timer-1.00.a",
 		       xilinx_timer_init);

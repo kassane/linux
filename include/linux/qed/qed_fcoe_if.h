@@ -1,3 +1,6 @@
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
+/* Copyright (c) 2019-2020 Marvell International Ltd. */
+
 #ifndef _QED_FCOE_IF_H
 #define _QED_FCOE_IF_H
 #include <linux/types.h>
@@ -24,6 +27,11 @@ struct qed_dev_fcoe_info {
 
 	void __iomem *primary_dbq_rq_addr;
 	void __iomem *secondary_bdq_rq_addr;
+
+	u64 wwpn;
+	u64 wwnn;
+
+	u8 num_cqs;
 };
 
 struct qed_fcoe_params_offload {
@@ -68,7 +76,7 @@ void qed_fcoe_set_pf_params(struct qed_dev *cdev,
  * @fill_dev_info:	fills FCoE specific information
  *			@param cdev
  *			@param info
- *			@return 0 on sucesss, otherwise error value.
+ *			@return 0 on success, otherwise error value.
  * @register_ops:	register FCoE operations
  *			@param cdev
  *			@param ops - specified using qed_iscsi_cb_ops
@@ -88,7 +96,7 @@ void qed_fcoe_set_pf_params(struct qed_dev *cdev,
  *				connection.
  *			@param p_doorbell - qed will fill the address of the
  *				doorbell.
- *			return 0 on sucesss, otherwise error value.
+ *			return 0 on success, otherwise error value.
  * @release_conn:	release a previously acquired fcoe connection
  *			@param cdev
  *			@param handle - the connection handle.

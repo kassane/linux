@@ -356,42 +356,38 @@ static int dw_i2s_set_fmt(struct snd_soc_dai *cpu_dai, unsigned int fmt)
 	struct dw_i2s_dev *dev = snd_soc_dai_get_drvdata(cpu_dai);
 	int ret = 0;
 
-	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_BC_FC:
 		if (dev->capability & DW_I2S_SLAVE)
 			ret = 0;
 		else
 			ret = -EINVAL;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_BP_FP:
 		if (dev->capability & DW_I2S_MASTER)
 			ret = 0;
 		else
 			ret = -EINVAL;
 		break;
-	case SND_SOC_DAIFMT_CBM_CFS:
-	case SND_SOC_DAIFMT_CBS_CFM:
+	case SND_SOC_DAIFMT_BC_FP:
+	case SND_SOC_DAIFMT_BP_FC:
 		ret = -EINVAL;
 		break;
 	default:
-		dev_dbg(dev->dev, "dwc : Invalid master/slave format\n");
+		dev_dbg(dev->dev, "dwc : Invalid clock provider format\n");
 		ret = -EINVAL;
 		break;
 	}
 	return ret;
 }
 
-static struct snd_soc_dai_ops dw_i2s_dai_ops = {
+static const struct snd_soc_dai_ops dw_i2s_dai_ops = {
 	.startup	= dw_i2s_startup,
 	.shutdown	= dw_i2s_shutdown,
 	.hw_params	= dw_i2s_hw_params,
 	.prepare	= dw_i2s_prepare,
 	.trigger	= dw_i2s_trigger,
 	.set_fmt	= dw_i2s_set_fmt,
-};
-
-static const struct snd_soc_component_driver dw_i2s_component = {
-	.name		= "dw-i2s",
 };
 
 #ifdef CONFIG_PM
@@ -407,32 +403,43 @@ static int dw_i2s_runtime_suspend(struct device *dev)
 static int dw_i2s_runtime_resume(struct device *dev)
 {
 	struct dw_i2s_dev *dw_dev = dev_get_drvdata(dev);
+	int ret;
 
-	if (dw_dev->capability & DW_I2S_MASTER)
-		clk_enable(dw_dev->clk);
+	if (dw_dev->capability & DW_I2S_MASTER) {
+		ret = clk_enable(dw_dev->clk);
+		if (ret)
+			return ret;
+	}
 	return 0;
 }
 
-static int dw_i2s_suspend(struct snd_soc_dai *dai)
+static int dw_i2s_suspend(struct snd_soc_component *component)
 {
-	struct dw_i2s_dev *dev = snd_soc_dai_get_drvdata(dai);
+	struct dw_i2s_dev *dev = snd_soc_component_get_drvdata(component);
 
 	if (dev->capability & DW_I2S_MASTER)
 		clk_disable(dev->clk);
 	return 0;
 }
 
-static int dw_i2s_resume(struct snd_soc_dai *dai)
+static int dw_i2s_resume(struct snd_soc_component *component)
 {
-	struct dw_i2s_dev *dev = snd_soc_dai_get_drvdata(dai);
+	struct dw_i2s_dev *dev = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dai *dai;
+	int stream, ret;
 
-	if (dev->capability & DW_I2S_MASTER)
-		clk_enable(dev->clk);
+	if (dev->capability & DW_I2S_MASTER) {
+		ret = clk_enable(dev->clk);
+		if (ret)
+			return ret;
+	}
 
-	if (dai->playback_active)
-		dw_i2s_config(dev, SNDRV_PCM_STREAM_PLAYBACK);
-	if (dai->capture_active)
-		dw_i2s_config(dev, SNDRV_PCM_STREAM_CAPTURE);
+	for_each_component_dais(component, dai) {
+		for_each_pcm_streams(stream)
+			if (snd_soc_dai_stream_active(dai, stream))
+				dw_i2s_config(dev, stream);
+	}
+
 	return 0;
 }
 
@@ -440,6 +447,13 @@ static int dw_i2s_resume(struct snd_soc_dai *dai)
 #define dw_i2s_suspend	NULL
 #define dw_i2s_resume	NULL
 #endif
+
+static const struct snd_soc_component_driver dw_i2s_component = {
+	.name			= "dw-i2s",
+	.suspend		= dw_i2s_suspend,
+	.resume			= dw_i2s_resume,
+	.legacy_dai_naming	= 1,
+};
 
 /*
  * The following tables allow a direct lookup of various parameters
@@ -491,11 +505,17 @@ static int dw_configure_dai(struct dw_i2s_dev *dev,
 			dev->quirks & DW_I2S_QUIRK_COMP_PARAM1)
 		comp1 = comp1 & ~BIT(5);
 
+	if (dev->capability & DWC_I2S_PLAY &&
+			dev->quirks & DW_I2S_QUIRK_COMP_PARAM1)
+		comp1 = comp1 & ~BIT(6);
+
 	if (COMP1_TX_ENABLED(comp1)) {
 		dev_dbg(dev->dev, " designware: play supported\n");
 		idx = COMP1_TX_WORDSIZE_0(comp1);
 		if (WARN_ON(idx >= ARRAY_SIZE(formats)))
 			return -EINVAL;
+		if (dev->quirks & DW_I2S_QUIRK_16BIT_IDX_OVERRIDE)
+			idx = 1;
 		dw_i2s_dai->playback.channels_min = MIN_CHANNEL_NUM;
 		dw_i2s_dai->playback.channels_max =
 				1 << (COMP1_TX_CHANNELS(comp1) + 1);
@@ -508,6 +528,8 @@ static int dw_configure_dai(struct dw_i2s_dev *dev,
 		idx = COMP2_RX_WORDSIZE_0(comp2);
 		if (WARN_ON(idx >= ARRAY_SIZE(formats)))
 			return -EINVAL;
+		if (dev->quirks & DW_I2S_QUIRK_16BIT_IDX_OVERRIDE)
+			idx = 1;
 		dw_i2s_dai->capture.channels_min = MIN_CHANNEL_NUM;
 		dw_i2s_dai->capture.channels_max =
 				1 << (COMP1_RX_CHANNELS(comp1) + 1);
@@ -543,6 +565,8 @@ static int dw_configure_dai_by_pd(struct dw_i2s_dev *dev,
 	if (ret < 0)
 		return ret;
 
+	if (dev->quirks & DW_I2S_QUIRK_16BIT_IDX_OVERRIDE)
+		idx = 1;
 	/* Set DMA slaves info */
 	dev->play_dma_data.pd.data = pdata->play_dma_data;
 	dev->capture_dma_data.pd.data = pdata->capture_dma_data;
@@ -611,27 +635,22 @@ static int dw_i2s_probe(struct platform_device *pdev)
 	const char *clk_id;
 
 	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
-	if (!dev) {
-		dev_warn(&pdev->dev, "kzalloc fail\n");
+	if (!dev)
 		return -ENOMEM;
-	}
 
 	dw_i2s_dai = devm_kzalloc(&pdev->dev, sizeof(*dw_i2s_dai), GFP_KERNEL);
 	if (!dw_i2s_dai)
 		return -ENOMEM;
 
 	dw_i2s_dai->ops = &dw_i2s_dai_ops;
-	dw_i2s_dai->suspend = dw_i2s_suspend;
-	dw_i2s_dai->resume = dw_i2s_resume;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	dev->i2s_base = devm_ioremap_resource(&pdev->dev, res);
+	dev->i2s_base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 	if (IS_ERR(dev->i2s_base))
 		return PTR_ERR(dev->i2s_base);
 
 	dev->dev = &pdev->dev;
 
-	irq = platform_get_irq(pdev, 0);
+	irq = platform_get_irq_optional(pdev, 0);
 	if (irq >= 0) {
 		ret = devm_request_irq(&pdev->dev, irq, i2s_irq_handler, 0,
 				pdev->name, dev);

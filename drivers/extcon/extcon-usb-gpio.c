@@ -1,33 +1,23 @@
-/**
+// SPDX-License-Identifier: GPL-2.0-only
+/*
  * drivers/extcon/extcon-usb-gpio.c - USB GPIO extcon driver
  *
- * Copyright (C) 2015 Texas Instruments Incorporated - http://www.ti.com
+ * Copyright (C) 2015 Texas Instruments Incorporated - https://www.ti.com
  * Author: Roger Quadros <rogerq@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
-#include <linux/extcon.h>
-#include <linux/gpio.h>
+#include <linux/extcon-provider.h>
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/of_gpio.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
-#include <linux/acpi.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/mod_devicetable.h>
 
 #define USB_GPIO_DEBOUNCE_MS	20	/* ms */
 
@@ -111,7 +101,7 @@ static int usb_extcon_probe(struct platform_device *pdev)
 	struct usb_extcon_info *info;
 	int ret;
 
-	if (!np && !ACPI_HANDLE(dev))
+	if (!np)
 		return -EINVAL;
 
 	info = devm_kzalloc(&pdev->dev, sizeof(*info), GFP_KERNEL);
@@ -195,7 +185,7 @@ static int usb_extcon_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, info);
-	device_init_wakeup(dev, true);
+	device_set_wakeup_capable(&pdev->dev, true);
 
 	/* Perform initial detection */
 	usb_extcon_detect_cable(&info->wq_detcable.work);
@@ -236,16 +226,6 @@ static int usb_extcon_suspend(struct device *dev)
 		}
 	}
 
-	/*
-	 * We don't want to process any IRQs after this point
-	 * as GPIOs used behind I2C subsystem might not be
-	 * accessible until resume completes. So disable IRQ.
-	 */
-	if (info->id_gpiod)
-		disable_irq(info->id_irq);
-	if (info->vbus_gpiod)
-		disable_irq(info->vbus_irq);
-
 	if (!device_may_wakeup(dev))
 		pinctrl_pm_select_sleep_state(dev);
 
@@ -277,14 +257,8 @@ static int usb_extcon_resume(struct device *dev)
 		}
 	}
 
-	if (info->id_gpiod)
-		enable_irq(info->id_irq);
-	if (info->vbus_gpiod)
-		enable_irq(info->vbus_irq);
-
-	if (!device_may_wakeup(dev))
-		queue_delayed_work(system_power_efficient_wq,
-				   &info->wq_detcable, 0);
+	queue_delayed_work(system_power_efficient_wq,
+			   &info->wq_detcable, 0);
 
 	return ret;
 }

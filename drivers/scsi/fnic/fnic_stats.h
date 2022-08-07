@@ -1,21 +1,13 @@
-/*
- * Copyright 2013 Cisco Systems, Inc.  All rights reserved.
- *
- * This program is free software; you may redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright 2013 Cisco Systems, Inc.  All rights reserved. */
 #ifndef _FNIC_STATS_H_
 #define _FNIC_STATS_H_
+
+struct stats_timestamps {
+	struct timespec64 last_reset_time;
+	struct timespec64 last_read_time;
+};
+
 struct io_path_stats {
 	atomic64_t active_ios;
 	atomic64_t max_active_ios;
@@ -91,6 +83,9 @@ struct vlan_stats {
 struct misc_stats {
 	u64 last_isr_time;
 	u64 last_ack_time;
+	atomic64_t max_isr_jiffies;
+	atomic64_t max_isr_time_ms;
+	atomic64_t corr_work_done;
 	atomic64_t isr_count;
 	atomic64_t max_cq_entries;
 	atomic64_t ack_index_out_of_range;
@@ -107,9 +102,11 @@ struct misc_stats {
 	atomic64_t queue_fulls;
 	atomic64_t rport_not_ready;
 	atomic64_t frame_errors;
+	atomic64_t current_port_speed;
 };
 
 struct fnic_stats {
+	struct stats_timestamps stats_timestamps;
 	struct io_path_stats io_stats;
 	struct abort_stats abts_stats;
 	struct terminate_stats term_stats;
@@ -127,6 +124,6 @@ struct stats_debug_info {
 };
 
 int fnic_get_stats_data(struct stats_debug_info *, struct fnic_stats *);
-int fnic_stats_debugfs_init(struct fnic *);
+void fnic_stats_debugfs_init(struct fnic *);
 void fnic_stats_debugfs_remove(struct fnic *);
 #endif /* _FNIC_STATS_H_ */

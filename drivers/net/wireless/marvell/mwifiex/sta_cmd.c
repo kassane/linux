@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * Marvell Wireless LAN device driver: station command handling
+ * NXP Wireless LAN device driver: station command handling
  *
- * Copyright (C) 2011-2014, Marvell International Ltd.
- *
- * This software file (the "File") is distributed by Marvell International
- * Ltd. under the terms of the GNU General Public License Version 2, June 1991
- * (the "License").  You may use, redistribute and/or modify this File in
- * accordance with the terms and conditions of the License, a copy of which
- * is available by writing to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA or on the
- * worldwide web at http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
- *
- * THE FILE IS DISTRIBUTED AS-IS, WITHOUT WARRANTY OF ANY KIND, AND THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE
- * ARE EXPRESSLY DISCLAIMED.  The License provides additional details about
- * this warranty disclaimer.
+ * Copyright 2011-2020 NXP
  */
 
 #include "decl.h"
@@ -189,9 +177,7 @@ static int mwifiex_cmd_tx_rate_cfg(struct mwifiex_private *priv,
 	if (pbitmap_rates != NULL) {
 		rate_scope->hr_dsss_rate_bitmap = cpu_to_le16(pbitmap_rates[0]);
 		rate_scope->ofdm_rate_bitmap = cpu_to_le16(pbitmap_rates[1]);
-		for (i = 0;
-		     i < sizeof(rate_scope->ht_mcs_rate_bitmap) / sizeof(u16);
-		     i++)
+		for (i = 0; i < ARRAY_SIZE(rate_scope->ht_mcs_rate_bitmap); i++)
 			rate_scope->ht_mcs_rate_bitmap[i] =
 				cpu_to_le16(pbitmap_rates[2 + i]);
 		if (priv->adapter->fw_api_ver == MWIFIEX_FW_V15) {
@@ -206,9 +192,7 @@ static int mwifiex_cmd_tx_rate_cfg(struct mwifiex_private *priv,
 			cpu_to_le16(priv->bitmap_rates[0]);
 		rate_scope->ofdm_rate_bitmap =
 			cpu_to_le16(priv->bitmap_rates[1]);
-		for (i = 0;
-		     i < sizeof(rate_scope->ht_mcs_rate_bitmap) / sizeof(u16);
-		     i++)
+		for (i = 0; i < ARRAY_SIZE(rate_scope->ht_mcs_rate_bitmap); i++)
 			rate_scope->ht_mcs_rate_bitmap[i] =
 				cpu_to_le16(priv->bitmap_rates[2 + i]);
 		if (priv->adapter->fw_api_ver == MWIFIEX_FW_V15) {
@@ -400,6 +384,10 @@ mwifiex_cmd_802_11_hs_cfg(struct mwifiex_private *priv,
 	if (hs_activate) {
 		hs_cfg->action = cpu_to_le16(HS_ACTIVATE);
 		hs_cfg->params.hs_activate.resp_ctrl = cpu_to_le16(RESP_NEEDED);
+
+		adapter->hs_activated_manually = true;
+		mwifiex_dbg(priv->adapter, CMD,
+			    "cmd: Activating host sleep manually\n");
 	} else {
 		hs_cfg->action = cpu_to_le16(HS_CONFIGURE);
 		hs_cfg->params.hs_config.conditions = hscfg_param->conditions;
@@ -844,56 +832,50 @@ mwifiex_cmd_802_11_key_material_v1(struct mwifiex_private *priv,
 	}
 
 	if (!enc_key) {
-		memset(&key_material->key_param_set, 0,
-		       (NUM_WEP_KEYS *
-			sizeof(struct mwifiex_ie_type_key_param_set)));
+		struct host_cmd_ds_802_11_key_material_wep *key_material_wep =
+			(struct host_cmd_ds_802_11_key_material_wep *)key_material;
+		memset(key_material_wep->key_param_set, 0,
+		       sizeof(key_material_wep->key_param_set));
 		ret = mwifiex_set_keyparamset_wep(priv,
-						  &key_material->key_param_set,
+						  &key_material_wep->key_param_set[0],
 						  &key_param_len);
 		cmd->size = cpu_to_le16(key_param_len +
-				    sizeof(key_material->action) + S_DS_GEN);
+				    sizeof(key_material_wep->action) + S_DS_GEN);
 		return ret;
 	} else
 		memset(&key_material->key_param_set, 0,
 		       sizeof(struct mwifiex_ie_type_key_param_set));
 	if (enc_key->is_wapi_key) {
-		mwifiex_dbg(priv->adapter, INFO, "info: Set WAPI Key\n");
-		key_material->key_param_set.key_type_id =
-						cpu_to_le16(KEY_TYPE_ID_WAPI);
-		if (cmd_oid == KEY_INFO_ENABLED)
-			key_material->key_param_set.key_info =
-						cpu_to_le16(KEY_ENABLED);
-		else
-			key_material->key_param_set.key_info =
-						cpu_to_le16(!KEY_ENABLED);
+		struct mwifiex_ie_type_key_param_set *set;
 
-		key_material->key_param_set.key[0] = enc_key->key_index;
+		mwifiex_dbg(priv->adapter, INFO, "info: Set WAPI Key\n");
+		set = &key_material->key_param_set;
+		set->key_type_id = cpu_to_le16(KEY_TYPE_ID_WAPI);
+		if (cmd_oid == KEY_INFO_ENABLED)
+			set->key_info = cpu_to_le16(KEY_ENABLED);
+		else
+			set->key_info = cpu_to_le16(!KEY_ENABLED);
+
+		set->key[0] = enc_key->key_index;
 		if (!priv->sec_info.wapi_key_on)
-			key_material->key_param_set.key[1] = 1;
+			set->key[1] = 1;
 		else
 			/* set 0 when re-key */
-			key_material->key_param_set.key[1] = 0;
+			set->key[1] = 0;
 
 		if (!is_broadcast_ether_addr(enc_key->mac_addr)) {
 			/* WAPI pairwise key: unicast */
-			key_material->key_param_set.key_info |=
-				cpu_to_le16(KEY_UNICAST);
+			set->key_info |= cpu_to_le16(KEY_UNICAST);
 		} else {	/* WAPI group key: multicast */
-			key_material->key_param_set.key_info |=
-				cpu_to_le16(KEY_MCAST);
+			set->key_info |= cpu_to_le16(KEY_MCAST);
 			priv->sec_info.wapi_key_on = true;
 		}
 
-		key_material->key_param_set.type =
-					cpu_to_le16(TLV_TYPE_KEY_MATERIAL);
-		key_material->key_param_set.key_len =
-						cpu_to_le16(WAPI_KEY_LEN);
-		memcpy(&key_material->key_param_set.key[2],
-		       enc_key->key_material, enc_key->key_len);
-		memcpy(&key_material->key_param_set.key[2 + enc_key->key_len],
-		       enc_key->pn, PN_LEN);
-		key_material->key_param_set.length =
-			cpu_to_le16(WAPI_KEY_LEN + KEYPARAMSET_FIXED_LEN);
+		set->type = cpu_to_le16(TLV_TYPE_KEY_MATERIAL);
+		set->key_len = cpu_to_le16(WAPI_KEY_LEN);
+		memcpy(&set->key[2], enc_key->key_material, enc_key->key_len);
+		memcpy(&set->key[2 + enc_key->key_len], enc_key->pn, PN_LEN);
+		set->length = cpu_to_le16(WAPI_KEY_LEN + KEYPARAMSET_FIXED_LEN);
 
 		key_param_len = (WAPI_KEY_LEN + KEYPARAMSET_FIXED_LEN) +
 				 sizeof(struct mwifiex_ie_types_header);
@@ -1734,7 +1716,7 @@ mwifiex_cmd_tdls_config(struct mwifiex_private *priv,
 	default:
 		mwifiex_dbg(priv->adapter, ERROR,
 			    "Unknown TDLS configuration\n");
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 	}
 
 	le16_unaligned_add_cpu(&cmd->size, len);
@@ -1755,7 +1737,7 @@ mwifiex_cmd_tdls_oper(struct mwifiex_private *priv,
 	struct mwifiex_ie_types_vhtcap *vht_capab;
 	struct mwifiex_ie_types_aid *aid;
 	struct mwifiex_ie_types_tdls_idle_timeout *timeout;
-	u8 *pos, qos_info;
+	u8 *pos;
 	u16 config_len = 0;
 	struct station_parameters *params = priv->sta_params;
 
@@ -1789,37 +1771,38 @@ mwifiex_cmd_tdls_oper(struct mwifiex_private *priv,
 		put_unaligned_le16(params->capability, pos);
 		config_len += sizeof(params->capability);
 
-		qos_info = params->uapsd_queues | (params->max_sp << 5);
-		wmm_qos_info = (struct mwifiex_ie_types_qos_info *)(pos +
-								    config_len);
+		wmm_qos_info = (void *)(pos + config_len);
 		wmm_qos_info->header.type = cpu_to_le16(WLAN_EID_QOS_CAPA);
-		wmm_qos_info->header.len = cpu_to_le16(sizeof(qos_info));
-		wmm_qos_info->qos_info = qos_info;
+		wmm_qos_info->header.len =
+				cpu_to_le16(sizeof(wmm_qos_info->qos_info));
+		wmm_qos_info->qos_info = 0;
 		config_len += sizeof(struct mwifiex_ie_types_qos_info);
 
-		if (params->ht_capa) {
+		if (params->link_sta_params.ht_capa) {
 			ht_capab = (struct mwifiex_ie_types_htcap *)(pos +
 								    config_len);
 			ht_capab->header.type =
 					    cpu_to_le16(WLAN_EID_HT_CAPABILITY);
 			ht_capab->header.len =
 				   cpu_to_le16(sizeof(struct ieee80211_ht_cap));
-			memcpy(&ht_capab->ht_cap, params->ht_capa,
+			memcpy(&ht_capab->ht_cap, params->link_sta_params.ht_capa,
 			       sizeof(struct ieee80211_ht_cap));
 			config_len += sizeof(struct mwifiex_ie_types_htcap);
 		}
 
-		if (params->supported_rates && params->supported_rates_len) {
+		if (params->link_sta_params.supported_rates &&
+		    params->link_sta_params.supported_rates_len) {
 			tlv_rates = (struct host_cmd_tlv_rates *)(pos +
 								  config_len);
 			tlv_rates->header.type =
 					       cpu_to_le16(WLAN_EID_SUPP_RATES);
 			tlv_rates->header.len =
-				       cpu_to_le16(params->supported_rates_len);
-			memcpy(tlv_rates->rates, params->supported_rates,
-			       params->supported_rates_len);
+				       cpu_to_le16(params->link_sta_params.supported_rates_len);
+			memcpy(tlv_rates->rates,
+			       params->link_sta_params.supported_rates,
+			       params->link_sta_params.supported_rates_len);
 			config_len += sizeof(struct host_cmd_tlv_rates) +
-				      params->supported_rates_len;
+				      params->link_sta_params.supported_rates_len;
 		}
 
 		if (params->ext_capab && params->ext_capab_len) {
@@ -1833,14 +1816,14 @@ mwifiex_cmd_tdls_oper(struct mwifiex_private *priv,
 			config_len += sizeof(struct mwifiex_ie_types_extcap) +
 				      params->ext_capab_len;
 		}
-		if (params->vht_capa) {
+		if (params->link_sta_params.vht_capa) {
 			vht_capab = (struct mwifiex_ie_types_vhtcap *)(pos +
 								    config_len);
 			vht_capab->header.type =
 					   cpu_to_le16(WLAN_EID_VHT_CAPABILITY);
 			vht_capab->header.len =
 				  cpu_to_le16(sizeof(struct ieee80211_vht_cap));
-			memcpy(&vht_capab->vht_cap, params->vht_capa,
+			memcpy(&vht_capab->vht_cap, params->link_sta_params.vht_capa,
 			       sizeof(struct ieee80211_vht_cap));
 			config_len += sizeof(struct mwifiex_ie_types_vhtcap);
 		}
@@ -1861,7 +1844,7 @@ mwifiex_cmd_tdls_oper(struct mwifiex_private *priv,
 		break;
 	default:
 		mwifiex_dbg(priv->adapter, ERROR, "Unknown TDLS operation\n");
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 	}
 
 	le16_unaligned_add_cpu(&cmd->size, config_len);
@@ -1899,6 +1882,25 @@ static int mwifiex_cmd_get_wakeup_reason(struct mwifiex_private *priv,
 	cmd->command = cpu_to_le16(HostCmd_CMD_HS_WAKEUP_REASON);
 	cmd->size = cpu_to_le16(sizeof(struct host_cmd_ds_wakeup_reason) +
 				S_DS_GEN);
+
+	return 0;
+}
+
+static int mwifiex_cmd_get_chan_info(struct host_cmd_ds_command *cmd,
+				     u16 cmd_action)
+{
+	struct host_cmd_ds_sta_configure *sta_cfg_cmd = &cmd->params.sta_cfg;
+	struct host_cmd_tlv_channel_band *tlv_band_channel =
+	(struct host_cmd_tlv_channel_band *)sta_cfg_cmd->tlv_buffer;
+
+	cmd->command = cpu_to_le16(HostCmd_CMD_STA_CONFIGURE);
+	cmd->size = cpu_to_le16(sizeof(*sta_cfg_cmd) +
+				sizeof(*tlv_band_channel) + S_DS_GEN);
+	sta_cfg_cmd->action = cpu_to_le16(cmd_action);
+	memset(tlv_band_channel, 0, sizeof(*tlv_band_channel));
+	tlv_band_channel->header.type = cpu_to_le16(TLV_TYPE_CHANNELBANDLIST);
+	tlv_band_channel->header.len  = cpu_to_le16(sizeof(*tlv_band_channel) -
+					sizeof(struct mwifiex_ie_types_header));
 
 	return 0;
 }
@@ -2064,6 +2066,15 @@ int mwifiex_sta_prepare_cmd(struct mwifiex_private *priv, uint16_t cmd_no,
 	case HostCmd_CMD_11AC_CFG:
 		ret = mwifiex_cmd_11ac_cfg(priv, cmd_ptr, cmd_action, data_buf);
 		break;
+	case HostCmd_CMD_PACKET_AGGR_CTRL:
+		cmd_ptr->command = cpu_to_le16(cmd_no);
+		cmd_ptr->params.pkt_aggr_ctrl.action = cpu_to_le16(cmd_action);
+		cmd_ptr->params.pkt_aggr_ctrl.enable =
+						cpu_to_le16(*(u16 *)data_buf);
+		cmd_ptr->size =
+			cpu_to_le16(sizeof(struct host_cmd_ds_pkt_aggr_ctrl) +
+				    S_DS_GEN);
+		break;
 	case HostCmd_CMD_P2P_MODE_CFG:
 		cmd_ptr->command = cpu_to_le16(cmd_no);
 		cmd_ptr->params.mode_cfg.action = cpu_to_le16(cmd_action);
@@ -2202,6 +2213,13 @@ int mwifiex_sta_prepare_cmd(struct mwifiex_private *priv, uint16_t cmd_no,
 	case HostCmd_CMD_CHAN_REGION_CFG:
 		ret = mwifiex_cmd_chan_region_cfg(priv, cmd_ptr, cmd_action);
 		break;
+	case HostCmd_CMD_FW_DUMP_EVENT:
+		cmd_ptr->command = cpu_to_le16(cmd_no);
+		cmd_ptr->size = cpu_to_le16(S_DS_GEN);
+		break;
+	case HostCmd_CMD_STA_CONFIGURE:
+		ret = mwifiex_cmd_get_chan_info(cmd_ptr, cmd_action);
+		break;
 	default:
 		mwifiex_dbg(priv->adapter, ERROR,
 			    "PREP_CMD: unknown cmd- %#x\n", cmd_no);
@@ -2241,6 +2259,7 @@ int mwifiex_sta_init_cmd(struct mwifiex_private *priv, u8 first_sta, bool init)
 	enum state_11d_t state_11d;
 	struct mwifiex_ds_11n_tx_cfg tx_cfg;
 	u8 sdio_sp_rx_aggr_enable;
+	u16 packet_aggr_enable;
 	int data;
 
 	if (first_sta) {
@@ -2385,6 +2404,14 @@ int mwifiex_sta_init_cmd(struct mwifiex_private *priv, u8 first_sta, bool init)
 		if (ret)
 			mwifiex_dbg(priv->adapter, ERROR,
 				    "11D: failed to enable 11D\n");
+	}
+
+	/* Pacekt aggregation handshake with firmware */
+	if (aggr_ctrl) {
+		packet_aggr_enable = true;
+		mwifiex_send_cmd(priv, HostCmd_CMD_PACKET_AGGR_CTRL,
+				 HostCmd_ACT_GEN_SET, 0,
+				 &packet_aggr_enable, true);
 	}
 
 	/* Send cmd to FW to configure 11n specific configuration

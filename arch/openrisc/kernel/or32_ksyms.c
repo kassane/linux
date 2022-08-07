@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * OpenRISC or32_ksyms.c
  *
@@ -8,20 +9,16 @@
  * Modifications for the OpenRISC architecture:
  * Copyright (C) 2003 Matjaz Breskvar <phoenix@bsemi.com>
  * Copyright (C) 2010-2011 Jonas Bonn <jonas@southpole.se>
- *
- *      This program is free software; you can redistribute it and/or
- *      modify it under the terms of the GNU General Public License
- *      as published by the Free Software Foundation; either version
- *      2 of the License, or (at your option) any later version.
  */
 
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/elfcore.h>
 #include <linux/sched.h>
 #include <linux/in6.h>
 #include <linux/interrupt.h>
 #include <linux/vmalloc.h>
 #include <linux/semaphore.h>
+#include <linux/pgtable.h>
 
 #include <asm/processor.h>
 #include <linux/uaccess.h>
@@ -29,8 +26,6 @@
 #include <asm/io.h>
 #include <asm/hardirq.h>
 #include <asm/delay.h>
-#include <asm/pgalloc.h>
-#include <asm/pgtable.h>
 
 #define DECLARE_EXPORT(name) extern void name(void); EXPORT_SYMBOL(name)
 

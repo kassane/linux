@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright 2012 Intel Corporation
  * Author: Josh Triplett <josh@joshtriplett.org>
@@ -5,10 +6,6 @@
  * Based on the bgrt driver:
  * Copyright 2012 Red Hat, Inc <mjg@redhat.com>
  * Author: Matthew Garrett
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -20,7 +17,7 @@
 #include <linux/efi-bgrt.h>
 
 struct acpi_table_bgrt bgrt_tab;
-size_t __initdata bgrt_image_size;
+size_t bgrt_image_size;
 
 struct bmp_header {
 	u16 id;
@@ -36,20 +33,23 @@ void __init efi_bgrt_init(struct acpi_table_header *table)
 	if (acpi_disabled)
 		return;
 
+	if (!efi_enabled(EFI_MEMMAP))
+		return;
+
 	if (table->length < sizeof(bgrt_tab)) {
 		pr_notice("Ignoring BGRT: invalid length %u (expected %zu)\n",
 		       table->length, sizeof(bgrt_tab));
 		return;
 	}
 	*bgrt = *(struct acpi_table_bgrt *)table;
-	if (bgrt->version != 1) {
+	/*
+	 * Only version 1 is defined but some older laptops (seen on Lenovo
+	 * Ivy Bridge models) have a correct version 1 BGRT table with the
+	 * version set to 0, so we accept version 0 and 1.
+	 */
+	if (bgrt->version > 1) {
 		pr_notice("Ignoring BGRT: invalid version %u (expected 1)\n",
 		       bgrt->version);
-		goto out;
-	}
-	if (bgrt->status & 0xfe) {
-		pr_notice("Ignoring BGRT: reserved status bits are non-zero %u\n",
-		       bgrt->status);
 		goto out;
 	}
 	if (bgrt->image_type != 0) {
@@ -62,6 +62,10 @@ void __init efi_bgrt_init(struct acpi_table_header *table)
 		goto out;
 	}
 
+	if (efi_mem_type(bgrt->image_address) != EFI_BOOT_SERVICES_DATA) {
+		pr_notice("Ignoring BGRT: invalid image address\n");
+		goto out;
+	}
 	image = early_memremap(bgrt->image_address, sizeof(bmp_header));
 	if (!image) {
 		pr_notice("Ignoring BGRT: failed to map image header memory\n");

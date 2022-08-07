@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_POWERPC_FUTEX_H
 #define _ASM_POWERPC_FUTEX_H
 
@@ -7,14 +8,12 @@
 #include <linux/uaccess.h>
 #include <asm/errno.h>
 #include <asm/synch.h>
-#include <asm/asm-compat.h>
 
 #define __futex_atomic_op(insn, ret, oldval, uaddr, oparg) \
   __asm__ __volatile ( \
 	PPC_ATOMIC_ENTRY_BARRIER \
 "1:	lwarx	%0,0,%2\n" \
 	insn \
-	PPC405_ERR77(0, %2) \
 "2:	stwcx.	%1,0,%2\n" \
 	"bne-	1b\n" \
 	PPC_ATOMIC_EXIT_BARRIER \
@@ -29,20 +28,13 @@
 	: "b" (uaddr), "i" (-EFAULT), "r" (oparg) \
 	: "cr0", "memory")
 
-static inline int futex_atomic_op_inuser (int encoded_op, u32 __user *uaddr)
+static inline int arch_futex_atomic_op_inuser(int op, int oparg, int *oval,
+		u32 __user *uaddr)
 {
-	int op = (encoded_op >> 28) & 7;
-	int cmp = (encoded_op >> 24) & 15;
-	int oparg = (encoded_op << 8) >> 20;
-	int cmparg = (encoded_op << 20) >> 20;
 	int oldval = 0, ret;
-	if (encoded_op & (FUTEX_OP_OPARG_SHIFT << 28))
-		oparg = 1 << oparg;
 
-	if (! access_ok (VERIFY_WRITE, uaddr, sizeof(u32)))
+	if (!user_access_begin(uaddr, sizeof(u32)))
 		return -EFAULT;
-
-	pagefault_disable();
 
 	switch (op) {
 	case FUTEX_OP_SET:
@@ -63,20 +55,10 @@ static inline int futex_atomic_op_inuser (int encoded_op, u32 __user *uaddr)
 	default:
 		ret = -ENOSYS;
 	}
+	user_access_end();
 
-	pagefault_enable();
+	*oval = oldval;
 
-	if (!ret) {
-		switch (cmp) {
-		case FUTEX_OP_CMP_EQ: ret = (oldval == cmparg); break;
-		case FUTEX_OP_CMP_NE: ret = (oldval != cmparg); break;
-		case FUTEX_OP_CMP_LT: ret = (oldval < cmparg); break;
-		case FUTEX_OP_CMP_GE: ret = (oldval >= cmparg); break;
-		case FUTEX_OP_CMP_LE: ret = (oldval <= cmparg); break;
-		case FUTEX_OP_CMP_GT: ret = (oldval > cmparg); break;
-		default: ret = -ENOSYS;
-		}
-	}
 	return ret;
 }
 
@@ -87,7 +69,7 @@ futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
 	int ret = 0;
 	u32 prev;
 
-	if (!access_ok(VERIFY_WRITE, uaddr, sizeof(u32)))
+	if (!user_access_begin(uaddr, sizeof(u32)))
 		return -EFAULT;
 
         __asm__ __volatile__ (
@@ -95,7 +77,6 @@ futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
 "1:     lwarx   %1,0,%3         # futex_atomic_cmpxchg_inatomic\n\
         cmpw    0,%1,%4\n\
         bne-    3f\n"
-        PPC405_ERR77(0,%3)
 "2:     stwcx.  %5,0,%3\n\
         bne-    1b\n"
         PPC_ATOMIC_EXIT_BARRIER
@@ -109,7 +90,10 @@ futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
         : "r" (uaddr), "r" (oldval), "r" (newval), "i" (-EFAULT)
         : "cc", "memory");
 
+	user_access_end();
+
 	*uval = prev;
+
         return ret;
 }
 

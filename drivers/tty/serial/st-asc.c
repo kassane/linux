@@ -1,18 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * st-asc.c: ST Asynchronous serial controller (ASC) driver
  *
  * Copyright (C) 2003-2013 STMicroelectronics (R&D) Limited
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
  */
-
-#if defined(CONFIG_SERIAL_ST_ASC_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
-#define SUPPORT_SYSRQ
-#endif
 
 #include <linux/module.h>
 #include <linux/serial.h>
@@ -74,7 +65,7 @@ static struct uart_driver asc_uart_driver;
 /* ASC_RXBUF */
 #define ASC_RXBUF_PE			0x100
 #define ASC_RXBUF_FE			0x200
-/**
+/*
  * Some of status comes from higher bits of the character and some come from
  * the status register. Combining both of them in to single status using dummy
  * bits.
@@ -310,7 +301,7 @@ static void asc_receive_chars(struct uart_port *port)
 	if (mode == ASC_CTL_MODE_8BIT || mode == ASC_CTL_MODE_8BIT_PAR)
 		ignore_pe = true;
 
-	if (port->irq_wake)
+	if (irqd_is_wakeup_set(irq_get_irq_data(port->irq)))
 		pm_wakeup_event(tport->tty->dev, 0);
 
 	while ((status = asc_in(port, ASC_STA)) & ASC_STA_RBF) {
@@ -487,7 +478,7 @@ static void asc_pm(struct uart_port *port, unsigned int state,
 		unsigned int oldstate)
 {
 	struct asc_port *ascport = to_asc_port(port);
-	unsigned long flags = 0;
+	unsigned long flags;
 	u32 ctl;
 
 	switch (state) {
@@ -513,7 +504,6 @@ static void asc_set_termios(struct uart_port *port, struct ktermios *termios,
 			    struct ktermios *old)
 {
 	struct asc_port *ascport = to_asc_port(port);
-	struct device_node *np = port->dev->of_node;
 	struct gpio_desc *gpiod;
 	unsigned int baud;
 	u32 ctrl_val;
@@ -545,10 +535,14 @@ static void asc_set_termios(struct uart_port *port, struct ktermios *termios,
 	/* set character length */
 	if ((cflag & CSIZE) == CS7) {
 		ctrl_val |= ASC_CTL_MODE_7BIT_PAR;
+		cflag |= PARENB;
 	} else {
 		ctrl_val |= (cflag & PARENB) ?  ASC_CTL_MODE_8BIT_PAR :
 						ASC_CTL_MODE_8BIT;
+		cflag &= ~CSIZE;
+		cflag |= CS8;
 	}
+	termios->c_cflag = cflag;
 
 	/* set stop bit */
 	ctrl_val |= (cflag & CSTOPB) ? ASC_CTL_STOP_2BIT : ASC_CTL_STOP_1BIT;
@@ -575,13 +569,12 @@ static void asc_set_termios(struct uart_port *port, struct ktermios *termios,
 			pinctrl_select_state(ascport->pinctrl,
 					     ascport->states[NO_HW_FLOWCTRL]);
 
-			gpiod = devm_fwnode_get_gpiod_from_child(port->dev,
-								 "rts",
-								 &np->fwnode,
-								 GPIOD_OUT_LOW,
-								 np->name);
-			if (!IS_ERR(gpiod))
+			gpiod = devm_gpiod_get(port->dev, "rts", GPIOD_OUT_LOW);
+			if (!IS_ERR(gpiod)) {
+				gpiod_set_consumer_name(gpiod,
+						port->dev->of_node->name);
 				ascport->rts = gpiod;
+			}
 		}
 	}
 
@@ -735,6 +728,7 @@ static int asc_init_port(struct asc_port *ascport,
 	port->fifosize	= ASC_FIFO_SIZE;
 	port->dev	= &pdev->dev;
 	port->irq	= platform_get_irq(pdev, 0);
+	port->has_sysrq = IS_ENABLED(CONFIG_SERIAL_ST_ASC_CONSOLE);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	port->membase = devm_ioremap_resource(&pdev->dev, res);
@@ -758,6 +752,7 @@ static int asc_init_port(struct asc_port *ascport,
 	if (IS_ERR(ascport->pinctrl)) {
 		ret = PTR_ERR(ascport->pinctrl);
 		dev_err(&pdev->dev, "Failed to get Pinctrl: %d\n", ret);
+		return ret;
 	}
 
 	ascport->states[DEFAULT] =
@@ -786,7 +781,9 @@ static struct asc_port *asc_of_get_asc_port(struct platform_device *pdev)
 	if (!np)
 		return NULL;
 
-	id = of_alias_get_id(np, ASC_SERIAL_NAME);
+	id = of_alias_get_id(np, "serial");
+	if (id < 0)
+		id = of_alias_get_id(np, ASC_SERIAL_NAME);
 
 	if (id < 0)
 		id = 0;
@@ -844,16 +841,14 @@ static int asc_serial_remove(struct platform_device *pdev)
 #ifdef CONFIG_PM_SLEEP
 static int asc_serial_suspend(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct uart_port *port = platform_get_drvdata(pdev);
+	struct uart_port *port = dev_get_drvdata(dev);
 
 	return uart_suspend_port(&asc_uart_driver, port);
 }
 
 static int asc_serial_resume(struct device *dev)
 {
-	struct platform_device *pdev = to_platform_device(dev);
-	struct uart_port *port = platform_get_drvdata(pdev);
+	struct uart_port *port = dev_get_drvdata(dev);
 
 	return uart_resume_port(&asc_uart_driver, port);
 }
@@ -863,7 +858,7 @@ static int asc_serial_resume(struct device *dev)
 /*----------------------------------------------------------------------*/
 
 #ifdef CONFIG_SERIAL_ST_ASC_CONSOLE
-static void asc_console_putchar(struct uart_port *port, int ch)
+static void asc_console_putchar(struct uart_port *port, unsigned char ch)
 {
 	unsigned int timeout = 1000000;
 
@@ -887,13 +882,12 @@ static void asc_console_write(struct console *co, const char *s, unsigned count)
 	int locked = 1;
 	u32 intenable;
 
-	local_irq_save(flags);
 	if (port->sysrq)
 		locked = 0; /* asc_interrupt has already claimed the lock */
 	else if (oops_in_progress)
-		locked = spin_trylock(&port->lock);
+		locked = spin_trylock_irqsave(&port->lock, flags);
 	else
-		spin_lock(&port->lock);
+		spin_lock_irqsave(&port->lock, flags);
 
 	/*
 	 * Disable interrupts so we don't get the IRQ line bouncing
@@ -911,14 +905,13 @@ static void asc_console_write(struct console *co, const char *s, unsigned count)
 	asc_out(port, ASC_INTEN, intenable);
 
 	if (locked)
-		spin_unlock(&port->lock);
-	local_irq_restore(flags);
+		spin_unlock_irqrestore(&port->lock, flags);
 }
 
 static int asc_console_setup(struct console *co, char *options)
 {
 	struct asc_port *ascport;
-	int baud = 9600;
+	int baud = 115200;
 	int bits = 8;
 	int parity = 'n';
 	int flow = 'n';
@@ -986,7 +979,7 @@ static struct platform_driver asc_serial_driver = {
 static int __init asc_init(void)
 {
 	int ret;
-	static char banner[] __initdata =
+	static const char banner[] __initconst =
 		KERN_INFO "STMicroelectronics ASC driver initialized\n";
 
 	printk(banner);

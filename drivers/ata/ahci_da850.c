@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * DaVinci DA850 AHCI SATA platform driver
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
  */
 
 #include <linux/kernel.h>
@@ -171,7 +167,7 @@ static int ahci_da850_probe(struct platform_device *pdev)
 	u32 mpy;
 	int rc;
 
-	hpriv = ahci_platform_get_resources(pdev);
+	hpriv = ahci_platform_get_resources(pdev, 0);
 	if (IS_ERR(hpriv))
 		return PTR_ERR(hpriv);
 
@@ -216,12 +212,16 @@ static int ahci_da850_probe(struct platform_device *pdev)
 		return rc;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	if (!res)
+	if (!res) {
+		rc = -ENODEV;
 		goto disable_resources;
+	}
 
 	pwrdn_reg = devm_ioremap(dev, res->start, resource_size(res));
-	if (!pwrdn_reg)
+	if (!pwrdn_reg) {
+		rc = -ENOMEM;
 		goto disable_resources;
+	}
 
 	da850_sata_init(dev, pwrdn_reg, hpriv->mmio, mpy);
 
@@ -241,7 +241,7 @@ static SIMPLE_DEV_PM_OPS(ahci_da850_pm_ops, ahci_platform_suspend,
 
 static const struct of_device_id ahci_da850_of_match[] = {
 	{ .compatible = "ti,da850-ahci", },
-	{ },
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, ahci_da850_of_match);
 

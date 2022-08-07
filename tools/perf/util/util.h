@@ -1,89 +1,38 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef GIT_COMPAT_UTIL_H
 #define GIT_COMPAT_UTIL_H
 
-#define _ALL_SOURCE 1
 #define _BSD_SOURCE 1
 /* glibc 2.20 deprecates _BSD_SOURCE in favour of _DEFAULT_SOURCE */
 #define _DEFAULT_SOURCE 1
-#define HAS_BOOL
 
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdlib.h>
-#include <stdarg.h>
-#include <linux/types.h>
-
-extern char buildid_dir[];
-
-#ifdef __GNUC__
-#define NORETURN __attribute__((__noreturn__))
-#else
-#define NORETURN
-#ifndef __attribute__
-#define __attribute__(x)
+#include <linux/compiler.h>
+#include <sys/types.h>
+#ifndef __cplusplus
+#include <internal/cpumap.h>
 #endif
-#endif
-
-#define PERF_GTK_DSO  "libperf-gtk.so"
 
 /* General helper functions */
-void usage(const char *err) NORETURN;
-void die(const char *err, ...) NORETURN __attribute__((format (printf, 1, 2)));
-int error(const char *err, ...) __attribute__((format (printf, 1, 2)));
-void warning(const char *err, ...) __attribute__((format (printf, 1, 2)));
-
-void set_warning_routine(void (*routine)(const char *err, va_list params));
-
-int prefixcmp(const char *str, const char *prefix);
-void set_buildid_dir(const char *dir);
-
-static inline void *zalloc(size_t size)
-{
-	return calloc(1, size);
-}
-
-#define zfree(ptr) ({ free(*ptr); *ptr = NULL; })
+void usage(const char *err) __noreturn;
+void die(const char *err, ...) __noreturn __printf(1, 2);
 
 struct dirent;
 struct strlist;
 
 int mkdir_p(char *path, mode_t mode);
 int rm_rf(const char *path);
+int rm_rf_perf_data(const char *path);
 struct strlist *lsdir(const char *name, bool (*filter)(const char *, struct dirent *));
 bool lsdir_no_dot_filter(const char *name, struct dirent *d);
-int copyfile(const char *from, const char *to);
-int copyfile_mode(const char *from, const char *to, mode_t mode);
-int copyfile_offset(int fromfd, loff_t from_ofs, int tofd, loff_t to_ofs, u64 size);
-
-ssize_t readn(int fd, void *buf, size_t n);
-ssize_t writen(int fd, void *buf, size_t n);
-
-struct perf_event_attr;
-
-void event_attr_init(struct perf_event_attr *attr);
 
 size_t hex_width(u64 v);
-int hex2u64(const char *ptr, u64 *val);
 
-extern unsigned int page_size;
-extern int cacheline_size;
-extern int sysctl_perf_event_max_stack;
-extern int sysctl_perf_event_max_contexts_per_stack;
+int sysctl__max_stack(void);
 
-struct parse_tag {
-	char tag;
-	int mult;
-};
-
-unsigned long parse_tag_value(const char *str, struct parse_tag *tags);
-
-int perf_event_paranoid(void);
-
-void mem_bswap_64(void *src, int byte_size);
-void mem_bswap_32(void *src, int byte_size);
-
-bool find_process(const char *name);
+bool sysctl__nmi_watchdog_enabled(void);
 
 int fetch_kernel_version(unsigned int *puint,
 			 char *str, size_t str_sz);
@@ -93,10 +42,56 @@ int fetch_kernel_version(unsigned int *puint,
 #define KVER_FMT	"%d.%d.%d"
 #define KVER_PARAM(x)	KVER_VERSION(x), KVER_PATCHLEVEL(x), KVER_SUBLEVEL(x)
 
-const char *perf_tip(const char *dirpath);
+int perf_tip(char **strp, const char *dirpath);
 
 #ifndef HAVE_SCHED_GETCPU_SUPPORT
 int sched_getcpu(void);
 #endif
+
+extern bool perf_singlethreaded;
+
+void perf_set_singlethreaded(void);
+void perf_set_multithreaded(void);
+
+char *perf_exe(char *buf, int len);
+
+#ifndef O_CLOEXEC
+#ifdef __sparc__
+#define O_CLOEXEC      0x400000
+#elif defined(__alpha__) || defined(__hppa__)
+#define O_CLOEXEC      010000000
+#else
+#define O_CLOEXEC      02000000
+#endif
+#endif
+
+extern bool test_attr__enabled;
+void test_attr__ready(void);
+void test_attr__init(void);
+struct perf_event_attr;
+void test_attr__open(struct perf_event_attr *attr, pid_t pid, struct perf_cpu cpu,
+		     int fd, int group_fd, unsigned long flags);
+
+struct perf_debuginfod {
+	const char	*urls;
+	bool		 set;
+};
+void perf_debuginfod_setup(struct perf_debuginfod *di);
+
+char *filename_with_chroot(int pid, const char *filename);
+
+int do_realloc_array_as_needed(void **arr, size_t *arr_sz, size_t x,
+			       size_t msz, const void *init_val);
+
+#define realloc_array_as_needed(a, n, x, v) ({			\
+	typeof(x) __x = (x);					\
+	__x >= (n) ?						\
+		do_realloc_array_as_needed((void **)&(a),	\
+					   &(n),		\
+					   __x,			\
+					   sizeof(*(a)),	\
+					   (const void *)(v)) :	\
+		0;						\
+	})
 
 #endif /* GIT_COMPAT_UTIL_H */

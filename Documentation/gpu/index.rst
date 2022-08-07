@@ -10,14 +10,15 @@ Linux GPU Driver Developer's Guide
    drm-kms
    drm-kms-helpers
    drm-uapi
-   i915
-   meson
-   tinydrm
-   vc4
+   drm-usage-stats
+   driver-uapi
+   drm-client
+   drivers
+   backlight
    vga-switcheroo
    vgaarbiter
-   bridge/dw-hdmi
    todo
+   rfc/index
 
 .. only::  subproject and html
 

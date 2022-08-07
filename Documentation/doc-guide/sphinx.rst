@@ -1,5 +1,8 @@
-Introduction
-============
+.. _sphinxdoc:
+
+=====================================
+Using Sphinx for kernel documentation
+=====================================
 
 The Linux kernel uses `Sphinx`_ to generate pretty documentation from
 `reStructuredText`_ files under ``Documentation``. To build the documentation in
@@ -15,34 +18,151 @@ are used to describe the functions and types and design of the code. The
 kernel-doc comments have some special structure and formatting, but beyond that
 they are also treated as reStructuredText.
 
-There is also the deprecated DocBook toolchain to generate documentation from
-DocBook XML template files under ``Documentation/DocBook``. The DocBook files
-are to be converted to reStructuredText, and the toolchain is slated to be
-removed.
-
 Finally, there are thousands of plain text documentation files scattered around
 ``Documentation``. Some of these will likely be converted to reStructuredText
 over time, but the bulk of them will remain in plain text.
+
+.. _sphinx_install:
+
+Sphinx Install
+==============
+
+The ReST markups currently used by the Documentation/ files are meant to be
+built with ``Sphinx`` version 1.7 or higher.
+
+There's a script that checks for the Sphinx requirements. Please see
+:ref:`sphinx-pre-install` for further details.
+
+Most distributions are shipped with Sphinx, but its toolchain is fragile,
+and it is not uncommon that upgrading it or some other Python packages
+on your machine would cause the documentation build to break.
+
+A way to avoid that is to use a different version than the one shipped
+with your distributions. In order to do so, it is recommended to install
+Sphinx inside a virtual environment, using ``virtualenv-3``
+or ``virtualenv``, depending on how your distribution packaged Python 3.
+
+.. note::
+
+   #) It is recommended to use the RTD theme for html output. Depending
+      on the Sphinx version, it should be installed separately,
+      with ``pip install sphinx_rtd_theme``.
+
+   #) Some ReST pages contain math expressions. Due to the way Sphinx works,
+      those expressions are written using LaTeX notation. It needs texlive
+      installed with amsfonts and amsmath in order to evaluate them.
+
+In summary, if you want to install Sphinx version 2.4.4, you should do::
+
+       $ virtualenv sphinx_2.4.4
+       $ . sphinx_2.4.4/bin/activate
+       (sphinx_2.4.4) $ pip install -r Documentation/sphinx/requirements.txt
+
+After running ``. sphinx_2.4.4/bin/activate``, the prompt will change,
+in order to indicate that you're using the new environment. If you
+open a new shell, you need to rerun this command to enter again at
+the virtual environment before building the documentation.
+
+Image output
+------------
+
+The kernel documentation build system contains an extension that
+handles images on both GraphViz and SVG formats (see
+:ref:`sphinx_kfigure`).
+
+For it to work, you need to install both GraphViz and ImageMagick
+packages. If those packages are not installed, the build system will
+still build the documentation, but won't include any images at the
+output.
+
+PDF and LaTeX builds
+--------------------
+
+Such builds are currently supported only with Sphinx versions 2.4 and higher.
+
+For PDF and LaTeX output, you'll also need ``XeLaTeX`` version 3.14159265.
+
+Depending on the distribution, you may also need to install a series of
+``texlive`` packages that provide the minimal set of functionalities
+required for ``XeLaTeX`` to work.
+
+.. _sphinx-pre-install:
+
+Checking for Sphinx dependencies
+--------------------------------
+
+There's a script that automatically check for Sphinx dependencies. If it can
+recognize your distribution, it will also give a hint about the install
+command line options for your distro::
+
+	$ ./scripts/sphinx-pre-install
+	Checking if the needed tools for Fedora release 26 (Twenty Six) are available
+	Warning: better to also install "texlive-luatex85".
+	You should run:
+
+		sudo dnf install -y texlive-luatex85
+		/usr/bin/virtualenv sphinx_2.4.4
+		. sphinx_2.4.4/bin/activate
+		pip install -r Documentation/sphinx/requirements.txt
+
+	Can't build as 1 mandatory dependency is missing at ./scripts/sphinx-pre-install line 468.
+
+By default, it checks all the requirements for both html and PDF, including
+the requirements for images, math expressions and LaTeX build, and assumes
+that a virtual Python environment will be used. The ones needed for html
+builds are assumed to be mandatory; the others to be optional.
+
+It supports two optional parameters:
+
+``--no-pdf``
+	Disable checks for PDF;
+
+``--no-virtualenv``
+	Use OS packaging for Sphinx instead of Python virtual environment.
+
 
 Sphinx Build
 ============
 
 The usual way to generate the documentation is to run ``make htmldocs`` or
-``make pdfdocs``. There are also other formats available, see the documentation
+``make pdfdocs``. There are also other formats available: see the documentation
 section of ``make help``. The generated documentation is placed in
 format-specific subdirectories under ``Documentation/output``.
 
 To generate documentation, Sphinx (``sphinx-build``) must obviously be
 installed. For prettier HTML output, the Read the Docs Sphinx theme
 (``sphinx_rtd_theme``) is used if available. For PDF output you'll also need
-``XeLaTeX`` and ``convert(1)`` from ImageMagick (https://www.imagemagick.org).
+``XeLaTeX`` and ``convert(1)`` from ImageMagick
+(https://www.imagemagick.org).\ [#ink]_
 All of these are widely available and packaged in distributions.
 
 To pass extra options to Sphinx, you can use the ``SPHINXOPTS`` make
 variable. For example, use ``make SPHINXOPTS=-v htmldocs`` to get more verbose
 output.
 
+It is also possible to pass an extra DOCS_CSS overlay file, in order to customize
+the html layout, by using the ``DOCS_CSS`` make variable.
+
+By default, the build will try to use the Read the Docs sphinx theme:
+
+    https://github.com/readthedocs/sphinx_rtd_theme
+
+If the theme is not available, it will fall-back to the classic one.
+
+The Sphinx theme can be overridden by using the ``DOCS_THEME`` make variable.
+
+There is another make variable ``SPHINXDIRS``, which is useful when test
+building a subset of documentation.  For example, you can build documents
+under ``Documentation/doc-guide`` by running
+``make SPHINXDIRS=doc-guide htmldocs``.
+The documentation section of ``make help`` will show you the list of
+subdirectories you can specify.
+
 To remove the generated documentation, run ``make cleandocs``.
+
+.. [#ink] Having ``inkscape(1)`` from Inkscape (https://inkscape.org)
+	  as well would improve the quality of images embedded in PDF
+	  documents, especially for kernel releases 5.18 and later.
 
 Writing Documentation
 =====================
@@ -117,13 +237,13 @@ Here are some specific guidelines for the kernel documentation:
   examples, etc.), use ``::`` for anything that doesn't really benefit
   from syntax highlighting, especially short snippets. Use
   ``.. code-block:: <language>`` for longer code blocks that benefit
-  from highlighting.
+  from highlighting. For a short snippet of code embedded in the text, use \`\`.
 
 
 the C domain
 ------------
 
-The `Sphinx C Domain`_ (name c) is suited for documentation of C API. E.g. a
+The **Sphinx C Domain** (name c) is suited for documentation of C API. E.g. a
 function prototype:
 
 .. code-block:: rst
@@ -141,22 +261,24 @@ The C domain of the kernel-doc has some additional features. E.g. you can
 
 The func-name (e.g. ioctl) remains in the output but the ref-name changed from
 ``ioctl`` to ``VIDIOC_LOG_STATUS``. The index entry for this function is also
-changed to ``VIDIOC_LOG_STATUS`` and the function can now referenced by:
+changed to ``VIDIOC_LOG_STATUS``.
 
-.. code-block:: rst
-
-     :c:func:`VIDIOC_LOG_STATUS`
+Please note that there is no need to use ``c:func:`` to generate cross
+references to function documentation.  Due to some Sphinx extension magic,
+the documentation build system will automatically turn a reference to
+``function()`` into a cross reference if an index entry for the given
+function name exists.  If you see ``c:func:`` use in a kernel document,
+please feel free to remove it.
 
 
 list tables
 -----------
 
-We recommend the use of *list table* formats. The *list table* formats are
-double-stage lists. Compared to the ASCII-art they might not be as
-comfortable for
-readers of the text files. Their advantage is that they are easy to
-create or modify and that the diff of a modification is much more meaningful,
-because it is limited to the modified content.
+The list-table formats can be useful for tables that are not easily laid
+out in the usual Sphinx ASCII-art formats.  These formats are nearly
+impossible for readers of the plain-text documents to understand, though,
+and should be avoided in the absence of a strong justification for their
+use.
 
 The ``flat-table`` is a double-stage list similar to the ``list-table`` with
 some additional features:
@@ -200,17 +322,17 @@ and *targets* (e.g. a ref to ``:ref:`last row <last row>``` / :ref:`last row
         - head col 3
         - head col 4
 
-      * - column 1
+      * - row 1
         - field 1.1
         - field 1.2 with autospan
 
-      * - column 2
+      * - row 2
         - field 2.1
         - :rspan:`1` :cspan:`1` field 2.2 - 3.3
 
       * .. _`last row`:
 
-        - column 3
+        - row 3
 
 Rendered as:
 
@@ -222,25 +344,53 @@ Rendered as:
         - head col 3
         - head col 4
 
-      * - column 1
+      * - row 1
         - field 1.1
         - field 1.2 with autospan
 
-      * - column 2
+      * - row 2
         - field 2.1
         - :rspan:`1` :cspan:`1` field 2.2 - 3.3
 
       * .. _`last row`:
 
-        - column 3
+        - row 3
 
+Cross-referencing
+-----------------
+
+Cross-referencing from one documentation page to another can be done simply by
+writing the path to the document file, no special syntax required. The path can
+be either absolute or relative. For absolute paths, start it with
+"Documentation/". For example, to cross-reference to this page, all the
+following are valid options, depending on the current document's directory (note
+that the ``.rst`` extension is required)::
+
+    See Documentation/doc-guide/sphinx.rst. This always works.
+    Take a look at sphinx.rst, which is at this same directory.
+    Read ../sphinx.rst, which is one directory above.
+
+If you want the link to have a different rendered text other than the document's
+title, you need to use Sphinx's ``doc`` role. For example::
+
+    See :doc:`my custom link text for document sphinx <sphinx>`.
+
+For most use cases, the former is preferred, as it is cleaner and more suited
+for people reading the source files. If you come across a ``:doc:`` usage that
+isn't adding any value, please feel free to convert it to just the document
+path.
+
+For information on cross-referencing to kernel-doc functions or types, see
+Documentation/doc-guide/kernel-doc.rst.
+
+.. _sphinx_kfigure:
 
 Figures & Images
 ================
 
 If you want to add an image, you should use the ``kernel-figure`` and
 ``kernel-image`` directives. E.g. to insert a figure with a scalable
-image format use SVG (:ref:`svg_image_example`)::
+image format, use SVG (:ref:`svg_image_example`)::
 
     .. kernel-figure::  svg_image.svg
        :alt:    simple SVG image
@@ -254,7 +404,7 @@ image format use SVG (:ref:`svg_image_example`)::
 
    SVG image example
 
-The kernel figure (and image) directive support **DOT** formated files, see
+The kernel figure (and image) directive supports **DOT** formatted files, see
 
 * DOT: http://graphviz.org/pdf/dotguide.pdf
 * Graphviz: http://www.graphviz.org/content/dot-language
@@ -273,7 +423,7 @@ A simple example (:ref:`hello_dot_file`)::
 
    DOT's hello world example
 
-Embed *render* markups (or languages) like Graphviz's **DOT** is provided by the
+Embedded *render* markups (or languages) like Graphviz's **DOT** are provided by the
 ``kernel-render`` directives.::
 
   .. kernel-render:: DOT
@@ -285,7 +435,7 @@ Embed *render* markups (or languages) like Graphviz's **DOT** is provided by the
      }
 
 How this will be rendered depends on the installed tools. If Graphviz is
-installed, you will see an vector image. If not the raw markup is inserted as
+installed, you will see a vector image. If not, the raw markup is inserted as
 *literal-block* (:ref:`hello_dot_render`).
 
 .. _hello_dot_render:
@@ -300,8 +450,8 @@ installed, you will see an vector image. If not the raw markup is inserted as
 
 The *render* directive has all the options known from the *figure* directive,
 plus option ``caption``.  If ``caption`` has a value, a *figure* node is
-inserted. If not, a *image* node is inserted. A ``caption`` is also needed, if
-you want to refer it (:ref:`hello_svg_render`).
+inserted. If not, an *image* node is inserted. A ``caption`` is also needed, if
+you want to refer to it (:ref:`hello_svg_render`).
 
 Embedded **SVG**::
 

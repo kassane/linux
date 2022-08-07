@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2016 Cavium, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License
- * as published by the Free Software Foundation.
  */
 
 #include <linux/device.h>
@@ -13,7 +10,6 @@
 #include <linux/moduleparam.h>
 #include <linux/pci.h>
 #include <linux/printk.h>
-#include <linux/version.h>
 
 #include "cptpf.h"
 
@@ -247,7 +243,7 @@ cpt_init_fail:
 
 struct ucode_header {
 	u8 version[CPT_UCODE_VERSION_SZ];
-	u32 code_length;
+	__be32 code_length;
 	u32 data_length;
 	u64 sram_address;
 };
@@ -268,19 +264,22 @@ static int cpt_ucode_load_fw(struct cpt_device *cpt, const u8 *fw, bool is_ae)
 	mcode = &cpt->mcode[cpt->next_mc_idx];
 	memcpy(mcode->version, (u8 *)fw_entry->data, CPT_UCODE_VERSION_SZ);
 	mcode->code_size = ntohl(ucode->code_length) * 2;
-	if (!mcode->code_size)
-		return -EINVAL;
+	if (!mcode->code_size) {
+		ret = -EINVAL;
+		goto fw_release;
+	}
 
 	mcode->is_ae = is_ae;
 	mcode->core_mask = 0ULL;
 	mcode->num_cores = is_ae ? 6 : 10;
 
 	/*  Allocate DMAable space */
-	mcode->code = dma_zalloc_coherent(&cpt->pdev->dev, mcode->code_size,
-					  &mcode->phys_base, GFP_KERNEL);
+	mcode->code = dma_alloc_coherent(&cpt->pdev->dev, mcode->code_size,
+					 &mcode->phys_base, GFP_KERNEL);
 	if (!mcode->code) {
 		dev_err(dev, "Unable to allocate space for microcode");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto fw_release;
 	}
 
 	memcpy((void *)mcode->code, (void *)(fw_entry->data + sizeof(*ucode)),
@@ -288,10 +287,10 @@ static int cpt_ucode_load_fw(struct cpt_device *cpt, const u8 *fw, bool is_ae)
 
 	/* Byte swap 64-bit */
 	for (j = 0; j < (mcode->code_size / 8); j++)
-		((u64 *)mcode->code)[j] = cpu_to_be64(((u64 *)mcode->code)[j]);
+		((__be64 *)mcode->code)[j] = cpu_to_be64(((u64 *)mcode->code)[j]);
 	/*  MC needs 16-bit swap */
 	for (j = 0; j < (mcode->code_size / 2); j++)
-		((u16 *)mcode->code)[j] = cpu_to_be16(((u16 *)mcode->code)[j]);
+		((__be16 *)mcode->code)[j] = cpu_to_be16(((u16 *)mcode->code)[j]);
 
 	dev_dbg(dev, "mcode->code_size = %u\n", mcode->code_size);
 	dev_dbg(dev, "mcode->is_ae = %u\n", mcode->is_ae);
@@ -302,12 +301,14 @@ static int cpt_ucode_load_fw(struct cpt_device *cpt, const u8 *fw, bool is_ae)
 	ret = do_cpt_init(cpt, mcode);
 	if (ret) {
 		dev_err(dev, "do_cpt_init failed with ret: %d\n", ret);
-		return ret;
+		goto fw_release;
 	}
 
 	dev_info(dev, "Microcode Loaded %s\n", mcode->version);
 	mcode->is_mc_valid = 1;
 	cpt->next_mc_idx++;
+
+fw_release:
 	release_firmware(fw_entry);
 
 	return ret;
@@ -400,7 +401,7 @@ static void cpt_disable_all_cores(struct cpt_device *cpt)
 	cpt_write_csr64(cpt->reg_base, CPTX_PF_EXE_CTL(0), 0);
 }
 
-/**
+/*
  * Ensure all cores are disengaged from all groups by
  * calling cpt_disable_all_cores() before calling this
  * function.
@@ -431,7 +432,7 @@ static int cpt_device_init(struct cpt_device *cpt)
 
 	/* Reset the PF when probed first */
 	cpt_reset(cpt);
-	mdelay(100);
+	msleep(100);
 
 	/*Check BIST status*/
 	bist = (u64)cpt_check_bist_status(cpt);
@@ -567,15 +568,9 @@ static int cpt_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto cpt_err_disable_device;
 	}
 
-	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(48));
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(48));
 	if (err) {
-		dev_err(dev, "Unable to get usable DMA configuration\n");
-		goto cpt_err_release_regions;
-	}
-
-	err = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(48));
-	if (err) {
-		dev_err(dev, "Unable to get 48-bit DMA for consistent allocations\n");
+		dev_err(dev, "Unable to get usable 48-bit DMA configuration\n");
 		goto cpt_err_release_regions;
 	}
 

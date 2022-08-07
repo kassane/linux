@@ -1,3 +1,5 @@
+.. SPDX-License-Identifier: GPL-2.0
+
 ================
 Power Management
 ================
@@ -5,11 +7,6 @@ Power Management
 .. toctree::
    :maxdepth: 2
 
-   cpufreq
-
-.. only::  subproject and html
-
-   Indices
-   =======
-
-   * :ref:`genindex`
+   strategies
+   system-wide
+   working-state

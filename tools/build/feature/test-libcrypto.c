@@ -1,5 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <openssl/sha.h>
 #include <openssl/md5.h>
+
+/*
+ * The MD5_* API have been deprecated since OpenSSL 3.0, which causes the
+ * feature test to fail silently. This is a workaround.
+ */
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 int main(void)
 {

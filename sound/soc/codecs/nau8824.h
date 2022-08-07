@@ -1,12 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * NAU88L24 ALSA SoC audio driver
  *
  * Copyright 2016 Nuvoton Technology Corp.
  * Author: John Hsu <KCHSU0@nuvoton.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __NAU8824_H__
@@ -200,7 +197,7 @@
 /* JACK_DET_CTRL (0x0D) */
 #define NAU8824_JACK_EJECT_DT_SFT	2
 #define NAU8824_JACK_EJECT_DT_MASK (0x3 << NAU8824_JACK_EJECT_DT_SFT)
-#define NAU8824_JACK_LOGIC		0x1
+#define NAU8824_JACK_LOGIC		(0x1 << 1)
 
 
 /* INTERRUPT_SETTING_1 (0x0F) */
@@ -257,6 +254,18 @@
 #define NAU8824_I2S_MS_MASTER		(1 << NAU8824_I2S_MS_SFT)
 #define NAU8824_I2S_MS_SLAVE		(0 << NAU8824_I2S_MS_SFT)
 #define NAU8824_I2S_BLK_DIV_MASK	0x7
+
+/* PORT0_LEFT_TIME_SLOT (0x1E) */
+#define NAU8824_TSLOT_L_MASK	0x3ff
+
+/* TDM_CTRL (0x20) */
+#define NAU8824_TDM_MODE		(0x1 << 15)
+#define NAU8824_TDM_OFFSET_EN		(0x1 << 14)
+#define NAU8824_TDM_DACL_RX_SFT	6
+#define NAU8824_TDM_DACL_RX_MASK	(0x3 << NAU8824_TDM_DACL_RX_SFT)
+#define NAU8824_TDM_DACR_RX_SFT	4
+#define NAU8824_TDM_DACR_RX_MASK	(0x3 << NAU8824_TDM_DACR_RX_SFT)
+#define NAU8824_TDM_TX_MASK		0xf
 
 /* ADC_FILTER_CTRL (0x24) */
 #define NAU8824_ADC_SYNC_DOWN_MASK	0x3
@@ -459,8 +468,9 @@ struct nau8824_osr_attr {
 };
 
 
-int nau8824_enable_jack_detect(struct snd_soc_codec *codec,
+int nau8824_enable_jack_detect(struct snd_soc_component *component,
 	struct snd_soc_jack *jack);
+const char *nau8824_components(void);
 
 #endif				/* _NAU8824_H */
 

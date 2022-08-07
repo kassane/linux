@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Author(s)......: Horst  Hummel    <Horst.Hummel@de.ibm.com>
  *		    Holger Smolinski <Holger.Smolinski@de.ibm.com>
@@ -200,7 +201,7 @@ dasd_3990_erp_DCTL(struct dasd_ccw_req * erp, char modifier)
 	struct ccw1 *ccw;
 	struct dasd_ccw_req *dctl_cqr;
 
-	dctl_cqr = dasd_alloc_erp_request((char *) &erp->magic, 1,
+	dctl_cqr = dasd_alloc_erp_request(erp->magic, 1,
 					  sizeof(struct DCTL_data),
 					  device);
 	if (IS_ERR(dctl_cqr)) {
@@ -1651,7 +1652,7 @@ dasd_3990_erp_action_1B_32(struct dasd_ccw_req * default_erp, char *sense)
 	}
 
 	/* Build new ERP request including DE/LO */
-	erp = dasd_alloc_erp_request((char *) &cqr->magic,
+	erp = dasd_alloc_erp_request(cqr->magic,
 				     2 + 1,/* DE/LO + TIC */
 				     sizeof(struct DE_eckd_data) +
 				     sizeof(struct LO_eckd_data), device);
@@ -1986,7 +1987,7 @@ dasd_3990_erp_compound_code(struct dasd_ccw_req * erp, char *sense)
  * DASD_3990_ERP_COMPOUND_CONFIG
  *
  * DESCRIPTION
- *   Handles the compound ERP action for configruation
+ *   Handles the compound ERP action for configuration
  *   dependent error.
  *   Note: duplex handling is not implemented (yet).
  *
@@ -2213,15 +2214,28 @@ static void dasd_3990_erp_disable_path(struct dasd_device *device, __u8 lpum)
 {
 	int pos = pathmask_to_pos(lpum);
 
+	if (!(device->features & DASD_FEATURE_PATH_AUTODISABLE)) {
+		dev_err(&device->cdev->dev,
+			"Path %x.%02x (pathmask %02x) is operational despite excessive IFCCs\n",
+			device->path[pos].cssid, device->path[pos].chpid, lpum);
+		goto out;
+	}
+
 	/* no remaining path, cannot disable */
-	if (!(dasd_path_get_opm(device) & ~lpum))
-		return;
+	if (!(dasd_path_get_opm(device) & ~lpum)) {
+		dev_err(&device->cdev->dev,
+			"Last path %x.%02x (pathmask %02x) is operational despite excessive IFCCs\n",
+			device->path[pos].cssid, device->path[pos].chpid, lpum);
+		goto out;
+	}
 
 	dev_err(&device->cdev->dev,
 		"Path %x.%02x (pathmask %02x) is disabled - IFCC threshold exceeded\n",
 		device->path[pos].cssid, device->path[pos].chpid, lpum);
 	dasd_path_remove_opm(device, lpum);
 	dasd_path_add_ifccpm(device, lpum);
+
+out:
 	device->path[pos].errorclk = 0;
 	atomic_set(&device->path[pos].error_count, 0);
 }
@@ -2231,7 +2245,7 @@ static void dasd_3990_erp_account_error(struct dasd_ccw_req *erp)
 	struct dasd_device *device = erp->startdev;
 	__u8 lpum = erp->refers->irb.esw.esw1.lpum;
 	int pos = pathmask_to_pos(lpum);
-	unsigned long long clk;
+	unsigned long clk;
 
 	if (!device->path_thrhld)
 		return;
@@ -2374,7 +2388,7 @@ static struct dasd_ccw_req *dasd_3990_erp_add_erp(struct dasd_ccw_req *cqr)
 	}
 
 	/* allocate additional request block */
-	erp = dasd_alloc_erp_request((char *) &cqr->magic,
+	erp = dasd_alloc_erp_request(cqr->magic,
 				     cplength, datasize, device);
 	if (IS_ERR(erp)) {
                 if (cqr->retries <= 0) {
@@ -2800,6 +2814,16 @@ dasd_3990_erp_action(struct dasd_ccw_req * cqr)
 	} else {
 		/* matching erp found - set all leading erp's to DONE */
 		erp = dasd_3990_erp_handle_match_erp(cqr, erp);
+	}
+
+
+	/*
+	 * For path verification work we need to stick with the path that was
+	 * originally chosen so that the per path configuration data is
+	 * assigned correctly.
+	 */
+	if (test_bit(DASD_CQR_VERIFY_PATH, &erp->flags) && cqr->lpm) {
+		erp->lpm = cqr->lpm;
 	}
 
 	if (device->features & DASD_FEATURE_ERPLOG) {

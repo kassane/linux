@@ -1,18 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * DRA7 ATL (Audio Tracking Logic) clock driver
  *
  * Copyright (C) 2013 Texas Instruments, Inc.
  *
  * Peter Ujfalusi <peter.ujfalusi@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/init.h>
@@ -24,6 +16,9 @@
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/clk/ti.h>
+
+#include "clock.h"
 
 #define DRA7_ATL_INSTANCES	4
 
@@ -170,6 +165,7 @@ static void __init of_dra7_atl_clock_setup(struct device_node *node)
 	struct dra7_atl_desc *clk_hw = NULL;
 	struct clk_init_data init = { NULL };
 	const char **parent_names = NULL;
+	const char *name;
 	struct clk *clk;
 
 	clk_hw = kzalloc(sizeof(*clk_hw), GFP_KERNEL);
@@ -180,14 +176,15 @@ static void __init of_dra7_atl_clock_setup(struct device_node *node)
 
 	clk_hw->hw.init = &init;
 	clk_hw->divider = 1;
-	init.name = node->name;
+	name = ti_dt_clk_name(node);
+	init.name = name;
 	init.ops = &atl_clk_ops;
 	init.flags = CLK_IGNORE_UNUSED;
 	init.num_parents = of_clk_get_parent_count(node);
 
 	if (init.num_parents != 1) {
-		pr_err("%s: atl clock %s must have 1 parent\n", __func__,
-		       node->name);
+		pr_err("%s: atl clock %pOFn must have 1 parent\n", __func__,
+		       node);
 		goto cleanup;
 	}
 
@@ -200,7 +197,7 @@ static void __init of_dra7_atl_clock_setup(struct device_node *node)
 
 	init.parent_names = parent_names;
 
-	clk = clk_register(NULL, &clk_hw->hw);
+	clk = ti_clk_register(NULL, &clk_hw->hw, name);
 
 	if (!IS_ERR(clk)) {
 		of_clk_add_provider(node, of_clk_src_simple_get, clk);
@@ -230,7 +227,6 @@ static int of_dra7_atl_clk_probe(struct platform_device *pdev)
 	cinfo->iobase = of_iomap(node, 0);
 	cinfo->dev = &pdev->dev;
 	pm_runtime_enable(cinfo->dev);
-	pm_runtime_irq_safe(cinfo->dev);
 
 	pm_runtime_get_sync(cinfo->dev);
 	atl_write(cinfo, DRA7_ATL_PCLKMUX_REG(0), DRA7_ATL_PCLKMUX);
@@ -265,8 +261,7 @@ static int of_dra7_atl_clk_probe(struct platform_device *pdev)
 
 		/* Get configuration for the ATL instances */
 		snprintf(prop, sizeof(prop), "atl%u", i);
-		of_node_get(node);
-		cfg_node = of_find_node_by_name(node, prop);
+		cfg_node = of_get_child_by_name(node, prop);
 		if (cfg_node) {
 			ret = of_property_read_u32(cfg_node, "bws",
 						   &cdesc->bws);

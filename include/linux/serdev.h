@@ -1,14 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2016-2017 Linaro Ltd., Rob Herring <robh@kernel.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 #ifndef _LINUX_SERDEV_H
 #define _LINUX_SERDEV_H
@@ -27,8 +19,10 @@ struct serdev_device;
 
 /**
  * struct serdev_device_ops - Callback operations for a serdev device
- * @receive_buf:	Function called with data received from device.
- * @write_wakeup:	Function called when ready to transmit more data.
+ * @receive_buf:	Function called with data received from device;
+ *			returns number of bytes accepted; may sleep.
+ * @write_wakeup:	Function called when ready to transmit more data; must
+ *			not sleep.
  */
 struct serdev_device_ops {
 	int (*receive_buf)(struct serdev_device *, const unsigned char *, size_t);
@@ -41,12 +35,16 @@ struct serdev_device_ops {
  * @nr:		Device number on serdev bus.
  * @ctrl:	serdev controller managing this device.
  * @ops:	Device operations.
+ * @write_comp	Completion used by serdev_device_write() internally
+ * @write_lock	Lock to serialize access when writing data
  */
 struct serdev_device {
 	struct device dev;
 	int nr;
 	struct serdev_controller *ctrl;
 	const struct serdev_device_ops *ops;
+	struct completion write_comp;
+	struct mutex write_lock;
 };
 
 static inline struct serdev_device *to_serdev_device(struct device *d)
@@ -72,6 +70,12 @@ static inline struct serdev_device_driver *to_serdev_device_driver(struct device
 	return container_of(d, struct serdev_device_driver, driver);
 }
 
+enum serdev_parity {
+	SERDEV_PARITY_NONE,
+	SERDEV_PARITY_EVEN,
+	SERDEV_PARITY_ODD,
+};
+
 /*
  * serdev controller structures
  */
@@ -82,6 +86,7 @@ struct serdev_controller_ops {
 	int (*open)(struct serdev_controller *);
 	void (*close)(struct serdev_controller *);
 	void (*set_flow_control)(struct serdev_controller *, bool);
+	int (*set_parity)(struct serdev_controller *, enum serdev_parity);
 	unsigned int (*set_baudrate)(struct serdev_controller *, unsigned int);
 	void (*wait_until_sent)(struct serdev_controller *, long);
 	int (*get_tiocm)(struct serdev_controller *);
@@ -170,7 +175,7 @@ static inline void serdev_controller_write_wakeup(struct serdev_controller *ctrl
 	if (!serdev || !serdev->ops->write_wakeup)
 		return;
 
-	serdev->ops->write_wakeup(ctrl->serdev);
+	serdev->ops->write_wakeup(serdev);
 }
 
 static inline int serdev_controller_receive_buf(struct serdev_controller *ctrl,
@@ -180,21 +185,24 @@ static inline int serdev_controller_receive_buf(struct serdev_controller *ctrl,
 	struct serdev_device *serdev = ctrl->serdev;
 
 	if (!serdev || !serdev->ops->receive_buf)
-		return -EINVAL;
+		return 0;
 
-	return serdev->ops->receive_buf(ctrl->serdev, data, count);
+	return serdev->ops->receive_buf(serdev, data, count);
 }
 
 #if IS_ENABLED(CONFIG_SERIAL_DEV_BUS)
 
 int serdev_device_open(struct serdev_device *);
 void serdev_device_close(struct serdev_device *);
+int devm_serdev_device_open(struct device *, struct serdev_device *);
 unsigned int serdev_device_set_baudrate(struct serdev_device *, unsigned int);
 void serdev_device_set_flow_control(struct serdev_device *, bool);
+int serdev_device_write_buf(struct serdev_device *, const unsigned char *, size_t);
 void serdev_device_wait_until_sent(struct serdev_device *, long);
 int serdev_device_get_tiocm(struct serdev_device *);
 int serdev_device_set_tiocm(struct serdev_device *, int, int);
-int serdev_device_write_buf(struct serdev_device *, const unsigned char *, size_t);
+void serdev_device_write_wakeup(struct serdev_device *);
+int serdev_device_write(struct serdev_device *, const unsigned char *, size_t, long);
 void serdev_device_write_flush(struct serdev_device *);
 int serdev_device_write_room(struct serdev_device *);
 
@@ -231,6 +239,12 @@ static inline unsigned int serdev_device_set_baudrate(struct serdev_device *sdev
 	return 0;
 }
 static inline void serdev_device_set_flow_control(struct serdev_device *sdev, bool enable) {}
+static inline int serdev_device_write_buf(struct serdev_device *serdev,
+					  const unsigned char *buf,
+					  size_t count)
+{
+	return -ENODEV;
+}
 static inline void serdev_device_wait_until_sent(struct serdev_device *sdev, long timeout) {}
 static inline int serdev_device_get_tiocm(struct serdev_device *serdev)
 {
@@ -240,7 +254,8 @@ static inline int serdev_device_set_tiocm(struct serdev_device *serdev, int set,
 {
 	return -ENOTSUPP;
 }
-static inline int serdev_device_write_buf(struct serdev_device *sdev, const unsigned char *buf, size_t count)
+static inline int serdev_device_write(struct serdev_device *sdev, const unsigned char *buf,
+				      size_t count, unsigned long timeout)
 {
 	return -ENODEV;
 }
@@ -285,6 +300,9 @@ static inline int serdev_device_set_rts(struct serdev_device *serdev, bool enabl
 		return serdev_device_set_tiocm(serdev, 0, TIOCM_RTS);
 }
 
+int serdev_device_set_parity(struct serdev_device *serdev,
+			     enum serdev_parity parity);
+
 /*
  * serdev hooks into TTY core
  */
@@ -295,7 +313,7 @@ struct tty_driver;
 struct device *serdev_tty_port_register(struct tty_port *port,
 					struct device *parent,
 					struct tty_driver *drv, int idx);
-void serdev_tty_port_unregister(struct tty_port *port);
+int serdev_tty_port_unregister(struct tty_port *port);
 #else
 static inline struct device *serdev_tty_port_register(struct tty_port *port,
 					   struct device *parent,
@@ -303,7 +321,24 @@ static inline struct device *serdev_tty_port_register(struct tty_port *port,
 {
 	return ERR_PTR(-ENODEV);
 }
-static inline void serdev_tty_port_unregister(struct tty_port *port) {}
+static inline int serdev_tty_port_unregister(struct tty_port *port)
+{
+	return -ENODEV;
+}
 #endif /* CONFIG_SERIAL_DEV_CTRL_TTYPORT */
+
+struct acpi_resource;
+struct acpi_resource_uart_serialbus;
+
+#ifdef CONFIG_ACPI
+bool serdev_acpi_get_uart_resource(struct acpi_resource *ares,
+				   struct acpi_resource_uart_serialbus **uart);
+#else
+static inline bool serdev_acpi_get_uart_resource(struct acpi_resource *ares,
+						 struct acpi_resource_uart_serialbus **uart)
+{
+	return false;
+}
+#endif /* CONFIG_ACPI */
 
 #endif /*_LINUX_SERDEV_H */

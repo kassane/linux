@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *  Copyright IBM Corp. 2004
  *
@@ -33,5 +34,7 @@ static inline u64 cputime_to_usecs(const u64 cputime)
 u64 arch_cpu_idle_time(int cpu);
 
 #define arch_idle_time(cpu) arch_cpu_idle_time(cpu)
+
+void account_idle_time_irq(void);
 
 #endif /* _S390_CPUTIME_H */

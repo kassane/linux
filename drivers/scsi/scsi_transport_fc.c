@@ -1,29 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  FiberChannel transport specific attributes exported to sysfs.
  *
  *  Copyright (c) 2003 Silicon Graphics, Inc.  All rights reserved.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
- *  ========
- *
  *  Copyright (C) 2004-2007   James Smart, Emulex Corporation
  *    Rewrite for host, target, device, and remote port attributes,
  *    statistics, and service functions...
  *    Add vports, etc
- *
  */
 #include <linux/module.h>
 #include <linux/init.h>
@@ -39,6 +22,7 @@
 #include <net/netlink.h>
 #include <scsi/scsi_netlink_fc.h>
 #include <scsi/scsi_bsg_fc.h>
+#include <uapi/scsi/fc/fc_els.h>
 #include "scsi_priv.h"
 
 static int fc_queue_work(struct Scsi_Host *, struct work_struct *);
@@ -50,6 +34,11 @@ static int fc_bsg_hostadd(struct Scsi_Host *, struct fc_host_attrs *);
 static int fc_bsg_rportadd(struct Scsi_Host *, struct fc_rport *);
 static void fc_bsg_remove(struct request_queue *);
 static void fc_bsg_goose_queue(struct fc_rport *);
+static void fc_li_stats_update(u16 event_type,
+			       struct fc_fpin_stats *stats);
+static void fc_delivery_stats_update(u32 reason_code,
+				     struct fc_fpin_stats *stats);
+static void fc_cn_stats_update(u16 event_type, struct fc_fpin_stats *stats);
 
 /*
  * Module Parameters
@@ -147,6 +136,7 @@ static const struct {
 	{ FCH_EVT_PORT_OFFLINE,		"port_offline" },
 	{ FCH_EVT_PORT_FABRIC,		"port_fabric" },
 	{ FCH_EVT_LINK_UNKNOWN,		"link_unknown" },
+	{ FCH_EVT_LINK_FPIN,		"link_FPIN" },
 	{ FCH_EVT_VENDOR_UNIQUE,	"vendor_unique" },
 };
 fc_enum_name_search(host_event_code, fc_host_event_code,
@@ -158,20 +148,23 @@ fc_enum_name_search(host_event_code, fc_host_event_code,
 static struct {
 	enum fc_port_state	value;
 	char			*name;
+	int			matchlen;
 } fc_port_state_names[] = {
-	{ FC_PORTSTATE_UNKNOWN,		"Unknown" },
-	{ FC_PORTSTATE_NOTPRESENT,	"Not Present" },
-	{ FC_PORTSTATE_ONLINE,		"Online" },
-	{ FC_PORTSTATE_OFFLINE,		"Offline" },
-	{ FC_PORTSTATE_BLOCKED,		"Blocked" },
-	{ FC_PORTSTATE_BYPASSED,	"Bypassed" },
-	{ FC_PORTSTATE_DIAGNOSTICS,	"Diagnostics" },
-	{ FC_PORTSTATE_LINKDOWN,	"Linkdown" },
-	{ FC_PORTSTATE_ERROR,		"Error" },
-	{ FC_PORTSTATE_LOOPBACK,	"Loopback" },
-	{ FC_PORTSTATE_DELETED,		"Deleted" },
+	{ FC_PORTSTATE_UNKNOWN,		"Unknown", 7},
+	{ FC_PORTSTATE_NOTPRESENT,	"Not Present", 11 },
+	{ FC_PORTSTATE_ONLINE,		"Online", 6 },
+	{ FC_PORTSTATE_OFFLINE,		"Offline", 7 },
+	{ FC_PORTSTATE_BLOCKED,		"Blocked", 7 },
+	{ FC_PORTSTATE_BYPASSED,	"Bypassed", 8 },
+	{ FC_PORTSTATE_DIAGNOSTICS,	"Diagnostics", 11 },
+	{ FC_PORTSTATE_LINKDOWN,	"Linkdown", 8 },
+	{ FC_PORTSTATE_ERROR,		"Error", 5 },
+	{ FC_PORTSTATE_LOOPBACK,	"Loopback", 8 },
+	{ FC_PORTSTATE_DELETED,		"Deleted", 7 },
+	{ FC_PORTSTATE_MARGINAL,	"Marginal", 8 },
 };
 fc_enum_name_search(port_state, fc_port_state, fc_port_state_names)
+fc_enum_name_match(port_state, fc_port_state, fc_port_state_names)
 #define FC_PORTSTATE_MAX_NAMELEN	20
 
 
@@ -267,6 +260,9 @@ static const struct {
 	{ FC_PORTSPEED_50GBIT,		"50 Gbit" },
 	{ FC_PORTSPEED_100GBIT,		"100 Gbit" },
 	{ FC_PORTSPEED_25GBIT,		"25 Gbit" },
+	{ FC_PORTSPEED_64GBIT,		"64 Gbit" },
+	{ FC_PORTSPEED_128GBIT,		"128 Gbit" },
+	{ FC_PORTSPEED_256GBIT,		"256 Gbit" },
 	{ FC_PORTSPEED_NOT_NEGOTIATED,	"Not Negotiated" },
 };
 fc_bitfield_name_search(port_speed, fc_port_speed_names)
@@ -293,6 +289,9 @@ static const struct {
 	{ FC_PORT_ROLE_FCP_INITIATOR,		"FCP Initiator" },
 	{ FC_PORT_ROLE_IP_PORT,			"IP Port" },
 	{ FC_PORT_ROLE_FCP_DUMMY_INITIATOR,	"FCP Dummy Initiator" },
+	{ FC_PORT_ROLE_NVME_INITIATOR,		"NVMe Initiator" },
+	{ FC_PORT_ROLE_NVME_TARGET,		"NVMe Target" },
+	{ FC_PORT_ROLE_NVME_DISCOVERY,		"NVMe Discovery" },
 };
 fc_bitfield_name_search(port_roles, fc_port_role_names)
 
@@ -429,6 +428,7 @@ static int fc_host_setup(struct transport_container *tc, struct device *dev,
 	fc_host->fabric_name = -1;
 	memset(fc_host->symbolic_name, 0, sizeof(fc_host->symbolic_name));
 	memset(fc_host->system_hostname, 0, sizeof(fc_host->system_hostname));
+	memset(&fc_host->fpin_stats, 0, sizeof(fc_host->fpin_stats));
 
 	fc_host->tgtid_bind_type = FC_TGTID_BIND_BY_WWPN;
 
@@ -521,20 +521,23 @@ fc_get_event_number(void)
 }
 EXPORT_SYMBOL(fc_get_event_number);
 
-
 /**
- * fc_host_post_event - called to post an even on an fc_host.
+ * fc_host_post_fc_event - routine to do the work of posting an event
+ *                      on an fc_host.
  * @shost:		host the event occurred on
  * @event_number:	fc event number obtained from get_fc_event_number()
  * @event_code:		fc_host event being posted
- * @event_data:		32bits of data for the event being posted
+ * @data_len:		amount, in bytes, of event data
+ * @data_buf:		pointer to event data
+ * @vendor_id:          value for Vendor id
  *
  * Notes:
  *	This routine assumes no locks are held on entry.
  */
 void
-fc_host_post_event(struct Scsi_Host *shost, u32 event_number,
-		enum fc_host_event_code event_code, u32 event_data)
+fc_host_post_fc_event(struct Scsi_Host *shost, u32 event_number,
+		enum fc_host_event_code event_code,
+		u32 data_len, char *data_buf, u64 vendor_id)
 {
 	struct sk_buff *skb;
 	struct nlmsghdr	*nlh;
@@ -543,12 +546,15 @@ fc_host_post_event(struct Scsi_Host *shost, u32 event_number,
 	u32 len;
 	int err;
 
+	if (!data_buf || data_len < 4)
+		data_len = 0;
+
 	if (!scsi_nl_sock) {
 		err = -ENOENT;
 		goto send_fail;
 	}
 
-	len = FC_NL_MSGALIGN(sizeof(*event));
+	len = FC_NL_MSGALIGN(sizeof(*event) + data_len);
 
 	skb = nlmsg_new(len, GFP_KERNEL);
 	if (!skb) {
@@ -565,13 +571,14 @@ fc_host_post_event(struct Scsi_Host *shost, u32 event_number,
 
 	INIT_SCSI_NL_HDR(&event->snlh, SCSI_NL_TRANSPORT_FC,
 				FC_NL_ASYNC_EVENT, len);
-	event->seconds = get_seconds();
-	event->vendor_id = 0;
+	event->seconds = ktime_get_real_seconds();
+	event->vendor_id = vendor_id;
 	event->host_no = shost->host_no;
-	event->event_datalen = sizeof(u32);	/* bytes */
+	event->event_datalen = data_len;	/* bytes */
 	event->event_num = event_number;
 	event->event_code = event_code;
-	event->event_data = event_data;
+	if (data_len)
+		memcpy(&event->event_data, data_buf, data_len);
 
 	nlmsg_multicast(scsi_nl_sock, skb, 0, SCSI_NL_GRP_FC_EVENTS,
 			GFP_KERNEL);
@@ -584,14 +591,35 @@ send_fail:
 	printk(KERN_WARNING
 		"%s: Dropped Event : host %d %s data 0x%08x - err %d\n",
 		__func__, shost->host_no,
-		(name) ? name : "<unknown>", event_data, err);
+		(name) ? name : "<unknown>",
+		(data_len) ? *((u32 *)data_buf) : 0xFFFFFFFF, err);
 	return;
+}
+EXPORT_SYMBOL(fc_host_post_fc_event);
+
+/**
+ * fc_host_post_event - called to post an even on an fc_host.
+ * @shost:		host the event occurred on
+ * @event_number:	fc event number obtained from get_fc_event_number()
+ * @event_code:		fc_host event being posted
+ * @event_data:		32bits of data for the event being posted
+ *
+ * Notes:
+ *	This routine assumes no locks are held on entry.
+ */
+void
+fc_host_post_event(struct Scsi_Host *shost, u32 event_number,
+		enum fc_host_event_code event_code, u32 event_data)
+{
+	fc_host_post_fc_event(shost, event_number, event_code,
+		(u32)sizeof(u32), (char *)&event_data, 0);
 }
 EXPORT_SYMBOL(fc_host_post_event);
 
 
 /**
- * fc_host_post_vendor_event - called to post a vendor unique event on an fc_host
+ * fc_host_post_vendor_event - called to post a vendor unique event
+ *                      on an fc_host
  * @shost:		host the event occurred on
  * @event_number:	fc event number obtained from get_fc_event_number()
  * @data_len:		amount, in bytes, of vendor unique data
@@ -605,56 +633,308 @@ void
 fc_host_post_vendor_event(struct Scsi_Host *shost, u32 event_number,
 		u32 data_len, char * data_buf, u64 vendor_id)
 {
-	struct sk_buff *skb;
-	struct nlmsghdr	*nlh;
-	struct fc_nl_event *event;
-	u32 len;
-	int err;
-
-	if (!scsi_nl_sock) {
-		err = -ENOENT;
-		goto send_vendor_fail;
-	}
-
-	len = FC_NL_MSGALIGN(sizeof(*event) + data_len);
-
-	skb = nlmsg_new(len, GFP_KERNEL);
-	if (!skb) {
-		err = -ENOBUFS;
-		goto send_vendor_fail;
-	}
-
-	nlh = nlmsg_put(skb, 0, 0, SCSI_TRANSPORT_MSG, len, 0);
-	if (!nlh) {
-		err = -ENOBUFS;
-		goto send_vendor_fail_skb;
-	}
-	event = nlmsg_data(nlh);
-
-	INIT_SCSI_NL_HDR(&event->snlh, SCSI_NL_TRANSPORT_FC,
-				FC_NL_ASYNC_EVENT, len);
-	event->seconds = get_seconds();
-	event->vendor_id = vendor_id;
-	event->host_no = shost->host_no;
-	event->event_datalen = data_len;	/* bytes */
-	event->event_num = event_number;
-	event->event_code = FCH_EVT_VENDOR_UNIQUE;
-	memcpy(&event->event_data, data_buf, data_len);
-
-	nlmsg_multicast(scsi_nl_sock, skb, 0, SCSI_NL_GRP_FC_EVENTS,
-			GFP_KERNEL);
-	return;
-
-send_vendor_fail_skb:
-	kfree_skb(skb);
-send_vendor_fail:
-	printk(KERN_WARNING
-		"%s: Dropped Event : host %d vendor_unique - err %d\n",
-		__func__, shost->host_no, err);
-	return;
+	fc_host_post_fc_event(shost, event_number, FCH_EVT_VENDOR_UNIQUE,
+		data_len, data_buf, vendor_id);
 }
 EXPORT_SYMBOL(fc_host_post_vendor_event);
 
+/**
+ * fc_find_rport_by_wwpn - find the fc_rport pointer for a given wwpn
+ * @shost:		host the fc_rport is associated with
+ * @wwpn:		wwpn of the fc_rport device
+ *
+ * Notes:
+ *	This routine assumes no locks are held on entry.
+ */
+struct fc_rport *
+fc_find_rport_by_wwpn(struct Scsi_Host *shost, u64 wwpn)
+{
+	struct fc_rport *rport;
+	unsigned long flags;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+
+	list_for_each_entry(rport, &fc_host_rports(shost), peers) {
+		if (rport->port_state != FC_PORTSTATE_ONLINE)
+			continue;
+
+		if (rport->port_name == wwpn) {
+			spin_unlock_irqrestore(shost->host_lock, flags);
+			return rport;
+		}
+	}
+
+	spin_unlock_irqrestore(shost->host_lock, flags);
+	return NULL;
+}
+EXPORT_SYMBOL(fc_find_rport_by_wwpn);
+
+static void
+fc_li_stats_update(u16 event_type,
+		   struct fc_fpin_stats *stats)
+{
+	stats->li++;
+	switch (event_type) {
+	case FPIN_LI_UNKNOWN:
+		stats->li_failure_unknown++;
+		break;
+	case FPIN_LI_LINK_FAILURE:
+		stats->li_link_failure_count++;
+		break;
+	case FPIN_LI_LOSS_OF_SYNC:
+		stats->li_loss_of_sync_count++;
+		break;
+	case FPIN_LI_LOSS_OF_SIG:
+		stats->li_loss_of_signals_count++;
+		break;
+	case FPIN_LI_PRIM_SEQ_ERR:
+		stats->li_prim_seq_err_count++;
+		break;
+	case FPIN_LI_INVALID_TX_WD:
+		stats->li_invalid_tx_word_count++;
+		break;
+	case FPIN_LI_INVALID_CRC:
+		stats->li_invalid_crc_count++;
+		break;
+	case FPIN_LI_DEVICE_SPEC:
+		stats->li_device_specific++;
+		break;
+	}
+}
+
+static void
+fc_delivery_stats_update(u32 reason_code, struct fc_fpin_stats *stats)
+{
+	stats->dn++;
+	switch (reason_code) {
+	case FPIN_DELI_UNKNOWN:
+		stats->dn_unknown++;
+		break;
+	case FPIN_DELI_TIMEOUT:
+		stats->dn_timeout++;
+		break;
+	case FPIN_DELI_UNABLE_TO_ROUTE:
+		stats->dn_unable_to_route++;
+		break;
+	case FPIN_DELI_DEVICE_SPEC:
+		stats->dn_device_specific++;
+		break;
+	}
+}
+
+static void
+fc_cn_stats_update(u16 event_type, struct fc_fpin_stats *stats)
+{
+	stats->cn++;
+	switch (event_type) {
+	case FPIN_CONGN_CLEAR:
+		stats->cn_clear++;
+		break;
+	case FPIN_CONGN_LOST_CREDIT:
+		stats->cn_lost_credit++;
+		break;
+	case FPIN_CONGN_CREDIT_STALL:
+		stats->cn_credit_stall++;
+		break;
+	case FPIN_CONGN_OVERSUBSCRIPTION:
+		stats->cn_oversubscription++;
+		break;
+	case FPIN_CONGN_DEVICE_SPEC:
+		stats->cn_device_specific++;
+	}
+}
+
+/*
+ * fc_fpin_li_stats_update - routine to update Link Integrity
+ * event statistics.
+ * @shost:		host the FPIN was received on
+ * @tlv:		pointer to link integrity descriptor
+ *
+ */
+static void
+fc_fpin_li_stats_update(struct Scsi_Host *shost, struct fc_tlv_desc *tlv)
+{
+	u8 i;
+	struct fc_rport *rport = NULL;
+	struct fc_rport *attach_rport = NULL;
+	struct fc_host_attrs *fc_host = shost_to_fc_host(shost);
+	struct fc_fn_li_desc *li_desc = (struct fc_fn_li_desc *)tlv;
+	u16 event_type = be16_to_cpu(li_desc->event_type);
+	u64 wwpn;
+
+	rport = fc_find_rport_by_wwpn(shost,
+				      be64_to_cpu(li_desc->attached_wwpn));
+	if (rport &&
+	    (rport->roles & FC_PORT_ROLE_FCP_TARGET ||
+	     rport->roles & FC_PORT_ROLE_NVME_TARGET)) {
+		attach_rport = rport;
+		fc_li_stats_update(event_type, &attach_rport->fpin_stats);
+	}
+
+	if (be32_to_cpu(li_desc->pname_count) > 0) {
+		for (i = 0;
+		    i < be32_to_cpu(li_desc->pname_count);
+		    i++) {
+			wwpn = be64_to_cpu(li_desc->pname_list[i]);
+			rport = fc_find_rport_by_wwpn(shost, wwpn);
+			if (rport &&
+			    (rport->roles & FC_PORT_ROLE_FCP_TARGET ||
+			    rport->roles & FC_PORT_ROLE_NVME_TARGET)) {
+				if (rport == attach_rport)
+					continue;
+				fc_li_stats_update(event_type,
+						   &rport->fpin_stats);
+			}
+		}
+	}
+
+	if (fc_host->port_name == be64_to_cpu(li_desc->attached_wwpn))
+		fc_li_stats_update(event_type, &fc_host->fpin_stats);
+}
+
+/*
+ * fc_fpin_delivery_stats_update - routine to update Delivery Notification
+ * event statistics.
+ * @shost:		host the FPIN was received on
+ * @tlv:		pointer to delivery descriptor
+ *
+ */
+static void
+fc_fpin_delivery_stats_update(struct Scsi_Host *shost,
+			      struct fc_tlv_desc *tlv)
+{
+	struct fc_rport *rport = NULL;
+	struct fc_rport *attach_rport = NULL;
+	struct fc_host_attrs *fc_host = shost_to_fc_host(shost);
+	struct fc_fn_deli_desc *dn_desc = (struct fc_fn_deli_desc *)tlv;
+	u32 reason_code = be32_to_cpu(dn_desc->deli_reason_code);
+
+	rport = fc_find_rport_by_wwpn(shost,
+				      be64_to_cpu(dn_desc->attached_wwpn));
+	if (rport &&
+	    (rport->roles & FC_PORT_ROLE_FCP_TARGET ||
+	     rport->roles & FC_PORT_ROLE_NVME_TARGET)) {
+		attach_rport = rport;
+		fc_delivery_stats_update(reason_code,
+					 &attach_rport->fpin_stats);
+	}
+
+	if (fc_host->port_name == be64_to_cpu(dn_desc->attached_wwpn))
+		fc_delivery_stats_update(reason_code, &fc_host->fpin_stats);
+}
+
+/*
+ * fc_fpin_peer_congn_stats_update - routine to update Peer Congestion
+ * event statistics.
+ * @shost:		host the FPIN was received on
+ * @tlv:		pointer to peer congestion descriptor
+ *
+ */
+static void
+fc_fpin_peer_congn_stats_update(struct Scsi_Host *shost,
+				struct fc_tlv_desc *tlv)
+{
+	u8 i;
+	struct fc_rport *rport = NULL;
+	struct fc_rport *attach_rport = NULL;
+	struct fc_fn_peer_congn_desc *pc_desc =
+	    (struct fc_fn_peer_congn_desc *)tlv;
+	u16 event_type = be16_to_cpu(pc_desc->event_type);
+	u64 wwpn;
+
+	rport = fc_find_rport_by_wwpn(shost,
+				      be64_to_cpu(pc_desc->attached_wwpn));
+	if (rport &&
+	    (rport->roles & FC_PORT_ROLE_FCP_TARGET ||
+	     rport->roles & FC_PORT_ROLE_NVME_TARGET)) {
+		attach_rport = rport;
+		fc_cn_stats_update(event_type, &attach_rport->fpin_stats);
+	}
+
+	if (be32_to_cpu(pc_desc->pname_count) > 0) {
+		for (i = 0;
+		    i < be32_to_cpu(pc_desc->pname_count);
+		    i++) {
+			wwpn = be64_to_cpu(pc_desc->pname_list[i]);
+			rport = fc_find_rport_by_wwpn(shost, wwpn);
+			if (rport &&
+			    (rport->roles & FC_PORT_ROLE_FCP_TARGET ||
+			     rport->roles & FC_PORT_ROLE_NVME_TARGET)) {
+				if (rport == attach_rport)
+					continue;
+				fc_cn_stats_update(event_type,
+						   &rport->fpin_stats);
+			}
+		}
+	}
+}
+
+/*
+ * fc_fpin_congn_stats_update - routine to update Congestion
+ * event statistics.
+ * @shost:		host the FPIN was received on
+ * @tlv:		pointer to congestion descriptor
+ *
+ */
+static void
+fc_fpin_congn_stats_update(struct Scsi_Host *shost,
+			   struct fc_tlv_desc *tlv)
+{
+	struct fc_host_attrs *fc_host = shost_to_fc_host(shost);
+	struct fc_fn_congn_desc *congn = (struct fc_fn_congn_desc *)tlv;
+
+	fc_cn_stats_update(be16_to_cpu(congn->event_type),
+			   &fc_host->fpin_stats);
+}
+
+/**
+ * fc_host_fpin_rcv - routine to process a received FPIN.
+ * @shost:		host the FPIN was received on
+ * @fpin_len:		length of FPIN payload, in bytes
+ * @fpin_buf:		pointer to FPIN payload
+ *
+ * Notes:
+ *	This routine assumes no locks are held on entry.
+ */
+void
+fc_host_fpin_rcv(struct Scsi_Host *shost, u32 fpin_len, char *fpin_buf)
+{
+	struct fc_els_fpin *fpin = (struct fc_els_fpin *)fpin_buf;
+	struct fc_tlv_desc *tlv;
+	u32 desc_cnt = 0, bytes_remain;
+	u32 dtag;
+
+	/* Update Statistics */
+	tlv = (struct fc_tlv_desc *)&fpin->fpin_desc[0];
+	bytes_remain = fpin_len - offsetof(struct fc_els_fpin, fpin_desc);
+	bytes_remain = min_t(u32, bytes_remain, be32_to_cpu(fpin->desc_len));
+
+	while (bytes_remain >= FC_TLV_DESC_HDR_SZ &&
+	       bytes_remain >= FC_TLV_DESC_SZ_FROM_LENGTH(tlv)) {
+		dtag = be32_to_cpu(tlv->desc_tag);
+		switch (dtag) {
+		case ELS_DTAG_LNK_INTEGRITY:
+			fc_fpin_li_stats_update(shost, tlv);
+			break;
+		case ELS_DTAG_DELIVERY:
+			fc_fpin_delivery_stats_update(shost, tlv);
+			break;
+		case ELS_DTAG_PEER_CONGEST:
+			fc_fpin_peer_congn_stats_update(shost, tlv);
+			break;
+		case ELS_DTAG_CONGESTION:
+			fc_fpin_congn_stats_update(shost, tlv);
+		}
+
+		desc_cnt++;
+		bytes_remain -= FC_TLV_DESC_SZ_FROM_LENGTH(tlv);
+		tlv = fc_tlv_next_desc(tlv);
+	}
+
+	fc_host_post_fc_event(shost, fc_get_event_number(),
+				FCH_EVT_LINK_FPIN, fpin_len, fpin_buf, 0);
+}
+EXPORT_SYMBOL(fc_host_fpin_rcv);
 
 
 static __init int fc_transport_init(void)
@@ -951,7 +1231,59 @@ show_fc_rport_roles (struct device *dev, struct device_attribute *attr,
 static FC_DEVICE_ATTR(rport, roles, S_IRUGO,
 		show_fc_rport_roles, NULL);
 
-fc_private_rport_rd_enum_attr(port_state, FC_PORTSTATE_MAX_NAMELEN);
+static ssize_t fc_rport_set_marginal_state(struct device *dev,
+						struct device_attribute *attr,
+						const char *buf, size_t count)
+{
+	struct fc_rport *rport = transport_class_to_rport(dev);
+	enum fc_port_state port_state;
+	int ret = 0;
+
+	ret = get_fc_port_state_match(buf, &port_state);
+	if (ret)
+		return -EINVAL;
+	if (port_state == FC_PORTSTATE_MARGINAL) {
+		/*
+		 * Change the state to Marginal only if the
+		 * current rport state is Online
+		 * Allow only Online->Marginal
+		 */
+		if (rport->port_state == FC_PORTSTATE_ONLINE)
+			rport->port_state = port_state;
+		else
+			return -EINVAL;
+	} else if (port_state == FC_PORTSTATE_ONLINE) {
+		/*
+		 * Change the state to Online only if the
+		 * current rport state is Marginal
+		 * Allow only Marginal->Online
+		 */
+		if (rport->port_state == FC_PORTSTATE_MARGINAL)
+			rport->port_state = port_state;
+		else
+			return -EINVAL;
+	} else
+		return -EINVAL;
+	return count;
+}
+
+static ssize_t
+show_fc_rport_port_state(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	const char *name;
+	struct fc_rport *rport = transport_class_to_rport(dev);
+
+	name = get_fc_port_state_name(rport->port_state);
+	if (!name)
+		return -EINVAL;
+
+	return snprintf(buf, 20, "%s\n", name);
+}
+
+static FC_DEVICE_ATTR(rport, port_state, 0444 | 0200,
+			show_fc_rport_port_state, fc_rport_set_marginal_state);
+
 fc_private_rport_rd_attr(scsi_target_id, "%d\n", 20);
 
 /*
@@ -1001,6 +1333,67 @@ store_fc_rport_fast_io_fail_tmo(struct device *dev,
 }
 static FC_DEVICE_ATTR(rport, fast_io_fail_tmo, S_IRUGO | S_IWUSR,
 	show_fc_rport_fast_io_fail_tmo, store_fc_rport_fast_io_fail_tmo);
+
+#define fc_rport_fpin_statistic(name)					\
+static ssize_t fc_rport_fpinstat_##name(struct device *cd,		\
+				  struct device_attribute *attr,	\
+				  char *buf)				\
+{									\
+	struct fc_rport *rport = transport_class_to_rport(cd);		\
+									\
+	return snprintf(buf, 20, "0x%llx\n", rport->fpin_stats.name);	\
+}									\
+static FC_DEVICE_ATTR(rport, fpin_##name, 0444, fc_rport_fpinstat_##name, NULL)
+
+fc_rport_fpin_statistic(dn);
+fc_rport_fpin_statistic(dn_unknown);
+fc_rport_fpin_statistic(dn_timeout);
+fc_rport_fpin_statistic(dn_unable_to_route);
+fc_rport_fpin_statistic(dn_device_specific);
+fc_rport_fpin_statistic(cn);
+fc_rport_fpin_statistic(cn_clear);
+fc_rport_fpin_statistic(cn_lost_credit);
+fc_rport_fpin_statistic(cn_credit_stall);
+fc_rport_fpin_statistic(cn_oversubscription);
+fc_rport_fpin_statistic(cn_device_specific);
+fc_rport_fpin_statistic(li);
+fc_rport_fpin_statistic(li_failure_unknown);
+fc_rport_fpin_statistic(li_link_failure_count);
+fc_rport_fpin_statistic(li_loss_of_sync_count);
+fc_rport_fpin_statistic(li_loss_of_signals_count);
+fc_rport_fpin_statistic(li_prim_seq_err_count);
+fc_rport_fpin_statistic(li_invalid_tx_word_count);
+fc_rport_fpin_statistic(li_invalid_crc_count);
+fc_rport_fpin_statistic(li_device_specific);
+
+static struct attribute *fc_rport_statistics_attrs[] = {
+	&device_attr_rport_fpin_dn.attr,
+	&device_attr_rport_fpin_dn_unknown.attr,
+	&device_attr_rport_fpin_dn_timeout.attr,
+	&device_attr_rport_fpin_dn_unable_to_route.attr,
+	&device_attr_rport_fpin_dn_device_specific.attr,
+	&device_attr_rport_fpin_li.attr,
+	&device_attr_rport_fpin_li_failure_unknown.attr,
+	&device_attr_rport_fpin_li_link_failure_count.attr,
+	&device_attr_rport_fpin_li_loss_of_sync_count.attr,
+	&device_attr_rport_fpin_li_loss_of_signals_count.attr,
+	&device_attr_rport_fpin_li_prim_seq_err_count.attr,
+	&device_attr_rport_fpin_li_invalid_tx_word_count.attr,
+	&device_attr_rport_fpin_li_invalid_crc_count.attr,
+	&device_attr_rport_fpin_li_device_specific.attr,
+	&device_attr_rport_fpin_cn.attr,
+	&device_attr_rport_fpin_cn_clear.attr,
+	&device_attr_rport_fpin_cn_lost_credit.attr,
+	&device_attr_rport_fpin_cn_credit_stall.attr,
+	&device_attr_rport_fpin_cn_oversubscription.attr,
+	&device_attr_rport_fpin_cn_device_specific.attr,
+	NULL
+};
+
+static struct attribute_group fc_rport_statistics_group = {
+	.name = "statistics",
+	.attrs = fc_rport_statistics_attrs,
+};
 
 
 /*
@@ -1692,7 +2085,7 @@ fc_private_host_rd_attr(npiv_vports_inuse, "%u\n", 20);
  * Host Statistics Management
  */
 
-/* Show a given an attribute in the statistics group */
+/* Show a given attribute in the statistics group */
 static ssize_t
 fc_stat_show(const struct device *dev, char *buf, unsigned long offset)
 {
@@ -1755,6 +2148,42 @@ fc_host_statistic(fc_xid_not_found);
 fc_host_statistic(fc_xid_busy);
 fc_host_statistic(fc_seq_not_found);
 fc_host_statistic(fc_non_bls_resp);
+fc_host_statistic(cn_sig_warn);
+fc_host_statistic(cn_sig_alarm);
+
+
+#define fc_host_fpin_statistic(name)					\
+static ssize_t fc_host_fpinstat_##name(struct device *cd,		\
+				  struct device_attribute *attr,	\
+				  char *buf)				\
+{									\
+	struct Scsi_Host *shost = transport_class_to_shost(cd);		\
+	struct fc_host_attrs *fc_host = shost_to_fc_host(shost);	\
+									\
+	return snprintf(buf, 20, "0x%llx\n", fc_host->fpin_stats.name);	\
+}									\
+static FC_DEVICE_ATTR(host, fpin_##name, 0444, fc_host_fpinstat_##name, NULL)
+
+fc_host_fpin_statistic(dn);
+fc_host_fpin_statistic(dn_unknown);
+fc_host_fpin_statistic(dn_timeout);
+fc_host_fpin_statistic(dn_unable_to_route);
+fc_host_fpin_statistic(dn_device_specific);
+fc_host_fpin_statistic(cn);
+fc_host_fpin_statistic(cn_clear);
+fc_host_fpin_statistic(cn_lost_credit);
+fc_host_fpin_statistic(cn_credit_stall);
+fc_host_fpin_statistic(cn_oversubscription);
+fc_host_fpin_statistic(cn_device_specific);
+fc_host_fpin_statistic(li);
+fc_host_fpin_statistic(li_failure_unknown);
+fc_host_fpin_statistic(li_link_failure_count);
+fc_host_fpin_statistic(li_loss_of_sync_count);
+fc_host_fpin_statistic(li_loss_of_signals_count);
+fc_host_fpin_statistic(li_prim_seq_err_count);
+fc_host_fpin_statistic(li_invalid_tx_word_count);
+fc_host_fpin_statistic(li_invalid_crc_count);
+fc_host_fpin_statistic(li_device_specific);
 
 static ssize_t
 fc_reset_statistics(struct device *dev, struct device_attribute *attr,
@@ -1804,7 +2233,29 @@ static struct attribute *fc_statistics_attrs[] = {
 	&device_attr_host_fc_xid_busy.attr,
 	&device_attr_host_fc_seq_not_found.attr,
 	&device_attr_host_fc_non_bls_resp.attr,
+	&device_attr_host_cn_sig_warn.attr,
+	&device_attr_host_cn_sig_alarm.attr,
 	&device_attr_host_reset_statistics.attr,
+	&device_attr_host_fpin_dn.attr,
+	&device_attr_host_fpin_dn_unknown.attr,
+	&device_attr_host_fpin_dn_timeout.attr,
+	&device_attr_host_fpin_dn_unable_to_route.attr,
+	&device_attr_host_fpin_dn_device_specific.attr,
+	&device_attr_host_fpin_li.attr,
+	&device_attr_host_fpin_li_failure_unknown.attr,
+	&device_attr_host_fpin_li_link_failure_count.attr,
+	&device_attr_host_fpin_li_loss_of_sync_count.attr,
+	&device_attr_host_fpin_li_loss_of_signals_count.attr,
+	&device_attr_host_fpin_li_prim_seq_err_count.attr,
+	&device_attr_host_fpin_li_invalid_tx_word_count.attr,
+	&device_attr_host_fpin_li_invalid_crc_count.attr,
+	&device_attr_host_fpin_li_device_specific.attr,
+	&device_attr_host_fpin_cn.attr,
+	&device_attr_host_fpin_cn_clear.attr,
+	&device_attr_host_fpin_cn_lost_credit.attr,
+	&device_attr_host_fpin_cn_credit_stall.attr,
+	&device_attr_host_fpin_cn_oversubscription.attr,
+	&device_attr_host_fpin_cn_device_specific.attr,
 	NULL
 };
 
@@ -2085,7 +2536,7 @@ fc_eh_timed_out(struct scsi_cmnd *scmd)
 	if (rport->port_state == FC_PORTSTATE_BLOCKED)
 		return BLK_EH_RESET_TIMER;
 
-	return BLK_EH_NOT_HANDLED;
+	return BLK_EH_DONE;
 }
 EXPORT_SYMBOL(fc_eh_timed_out);
 
@@ -2106,7 +2557,8 @@ fc_user_scan_tgt(struct Scsi_Host *shost, uint channel, uint id, u64 lun)
 		if (rport->scsi_target_id == -1)
 			continue;
 
-		if (rport->port_state != FC_PORTSTATE_ONLINE)
+		if ((rport->port_state != FC_PORTSTATE_ONLINE) &&
+			(rport->port_state != FC_PORTSTATE_MARGINAL))
 			continue;
 
 		if ((channel == rport->channel) &&
@@ -2188,6 +2640,7 @@ fc_attach_transport(struct fc_function_template *ft)
 	i->rport_attr_cont.ac.attrs = &i->rport_attrs[0];
 	i->rport_attr_cont.ac.class = &fc_rport_class.class;
 	i->rport_attr_cont.ac.match = fc_rport_match;
+	i->rport_attr_cont.statistics = &fc_rport_statistics_group;
 	transport_container_register(&i->rport_attr_cont);
 
 	i->vport_attr_cont.ac.attrs = &i->vport_attrs[0];
@@ -2273,7 +2726,7 @@ fc_attach_transport(struct fc_function_template *ft)
 	SETUP_PRIVATE_RPORT_ATTRIBUTE_RD(port_name);
 	SETUP_PRIVATE_RPORT_ATTRIBUTE_RD(port_id);
 	SETUP_PRIVATE_RPORT_ATTRIBUTE_RD(roles);
-	SETUP_PRIVATE_RPORT_ATTRIBUTE_RD(port_state);
+	SETUP_PRIVATE_RPORT_ATTRIBUTE_RW(port_state);
 	SETUP_PRIVATE_RPORT_ATTRIBUTE_RD(scsi_target_id);
 	SETUP_PRIVATE_RPORT_ATTRIBUTE_RW(fast_io_fail_tmo);
 
@@ -2430,8 +2883,10 @@ fc_remove_host(struct Scsi_Host *shost)
 	spin_lock_irqsave(shost->host_lock, flags);
 
 	/* Remove any vports */
-	list_for_each_entry_safe(vport, next_vport, &fc_host->vports, peers)
+	list_for_each_entry_safe(vport, next_vport, &fc_host->vports, peers) {
+		vport->flags |= FC_VPORT_DELETING;
 		fc_queue_work(shost, &vport->vport_delete_work);
+	}
 
 	/* Remove any remote ports */
 	list_for_each_entry_safe(rport, next_rport,
@@ -2737,7 +3192,8 @@ fc_remote_port_add(struct Scsi_Host *shost, int channel,
 
 	list_for_each_entry(rport, &fc_host->rports, peers) {
 
-		if ((rport->port_state == FC_PORTSTATE_BLOCKED) &&
+		if ((rport->port_state == FC_PORTSTATE_BLOCKED ||
+		     rport->port_state == FC_PORTSTATE_NOTPRESENT) &&
 			(rport->channel == channel)) {
 
 			switch (fc_host->tgtid_bind_type) {
@@ -2874,7 +3330,6 @@ fc_remote_port_add(struct Scsi_Host *shost, int channel,
 			memcpy(&rport->port_name, &ids->port_name,
 				sizeof(rport->port_name));
 			rport->port_id = ids->port_id;
-			rport->roles = ids->roles;
 			rport->port_state = FC_PORTSTATE_ONLINE;
 			rport->flags &= ~FC_RPORT_FAST_FAIL_TIMEDOUT;
 
@@ -2883,15 +3338,7 @@ fc_remote_port_add(struct Scsi_Host *shost, int channel,
 						fci->f->dd_fcrport_size);
 			spin_unlock_irqrestore(shost->host_lock, flags);
 
-			if (ids->roles & FC_PORT_ROLE_FCP_TARGET) {
-				scsi_target_unblock(&rport->dev, SDEV_RUNNING);
-
-				/* initiate a scan of the target */
-				spin_lock_irqsave(shost->host_lock, flags);
-				rport->flags |= FC_RPORT_SCAN_PENDING;
-				scsi_queue_work(shost, &rport->scan_work);
-				spin_unlock_irqrestore(shost->host_lock, flags);
-			}
+			fc_remote_port_rolechg(rport, ids->roles);
 			return rport;
 		}
 	}
@@ -2914,16 +3361,18 @@ EXPORT_SYMBOL(fc_remote_port_add);
  * port is no longer part of the topology. Note: Although a port
  * may no longer be part of the topology, it may persist in the remote
  * ports displayed by the fc_host. We do this under 2 conditions:
+ *
  * 1) If the port was a scsi target, we delay its deletion by "blocking" it.
- *   This allows the port to temporarily disappear, then reappear without
- *   disrupting the SCSI device tree attached to it. During the "blocked"
- *   period the port will still exist.
+ *    This allows the port to temporarily disappear, then reappear without
+ *    disrupting the SCSI device tree attached to it. During the "blocked"
+ *    period the port will still exist.
+ *
  * 2) If the port was a scsi target and disappears for longer than we
- *   expect, we'll delete the port and the tear down the SCSI device tree
- *   attached to it. However, we want to semi-persist the target id assigned
- *   to that port if it eventually does exist. The port structure will
- *   remain (although with minimal information) so that the target id
- *   bindings remails.
+ *    expect, we'll delete the port and the tear down the SCSI device tree
+ *    attached to it. However, we want to semi-persist the target id assigned
+ *    to that port if it eventually does exist. The port structure will
+ *    remain (although with minimal information) so that the target id
+ *    bindings also remain.
  *
  * If the remote port is not an FCP Target, it will be fully torn down
  * and deallocated, including the fc_remote_port class device.
@@ -2937,7 +3386,7 @@ EXPORT_SYMBOL(fc_remote_port_add);
  *   If the remote port does not return (signaled by a LLDD call to
  *   fc_remote_port_add()) within the dev_loss_tmo timeout, then the
  *   scsi target is removed - killing all outstanding i/o and removing the
- *   scsi devices attached ot it. The port structure will be marked Not
+ *   scsi devices attached to it. The port structure will be marked Not
  *   Present and be partially cleared, leaving only enough information to
  *   recognize the remote port relative to the scsi target id binding if
  *   it later appears.  The port will remain as long as there is a valid
@@ -2973,7 +3422,8 @@ fc_remote_port_delete(struct fc_rport  *rport)
 
 	spin_lock_irqsave(shost->host_lock, flags);
 
-	if (rport->port_state != FC_PORTSTATE_ONLINE) {
+	if ((rport->port_state != FC_PORTSTATE_ONLINE) &&
+		(rport->port_state != FC_PORTSTATE_MARGINAL)) {
 		spin_unlock_irqrestore(shost->host_lock, flags);
 		return;
 	}
@@ -3056,7 +3506,7 @@ fc_remote_port_rolechg(struct fc_rport  *rport, u32 roles)
 		 * There may have been a delete timer running on the
 		 * port. Ensure that it is cancelled as we now know
 		 * the port is an FCP Target.
-		 * Note: we know the rport is exists and in an online
+		 * Note: we know the rport exists and is in an online
 		 *  state as the LLDD would not have had an rport
 		 *  reference to pass us.
 		 *
@@ -3115,7 +3565,8 @@ fc_timeout_deleted_rport(struct work_struct *work)
 	 * target, validate it still is. If not, tear down the
 	 * scsi_target on it.
 	 */
-	if ((rport->port_state == FC_PORTSTATE_ONLINE) &&
+	if (((rport->port_state == FC_PORTSTATE_ONLINE) ||
+		(rport->port_state == FC_PORTSTATE_MARGINAL)) &&
 	    (rport->scsi_target_id != -1) &&
 	    !(rport->roles & FC_PORT_ROLE_FCP_TARGET)) {
 		dev_printk(KERN_ERR, &rport->dev,
@@ -3258,7 +3709,8 @@ fc_scsi_scan_rport(struct work_struct *work)
 	struct fc_internal *i = to_fc_internal(shost->transportt);
 	unsigned long flags;
 
-	if ((rport->port_state == FC_PORTSTATE_ONLINE) &&
+	if (((rport->port_state == FC_PORTSTATE_ONLINE) ||
+		(rport->port_state == FC_PORTSTATE_MARGINAL)) &&
 	    (rport->roles & FC_PORT_ROLE_FCP_TARGET) &&
 	    !(i->f->disable_target_scan)) {
 		scsi_scan_target(&rport->dev, rport->channel,
@@ -3270,6 +3722,41 @@ fc_scsi_scan_rport(struct work_struct *work)
 	rport->flags &= ~FC_RPORT_SCAN_PENDING;
 	spin_unlock_irqrestore(shost->host_lock, flags);
 }
+
+/**
+ * fc_block_rport() - Block SCSI eh thread for blocked fc_rport.
+ * @rport: Remote port that scsi_eh is trying to recover.
+ *
+ * This routine can be called from a FC LLD scsi_eh callback. It
+ * blocks the scsi_eh thread until the fc_rport leaves the
+ * FC_PORTSTATE_BLOCKED, or the fast_io_fail_tmo fires. This is
+ * necessary to avoid the scsi_eh failing recovery actions for blocked
+ * rports which would lead to offlined SCSI devices.
+ *
+ * Returns: 0 if the fc_rport left the state FC_PORTSTATE_BLOCKED.
+ *	    FAST_IO_FAIL if the fast_io_fail_tmo fired, this should be
+ *	    passed back to scsi_eh.
+ */
+int fc_block_rport(struct fc_rport *rport)
+{
+	struct Scsi_Host *shost = rport_to_shost(rport);
+	unsigned long flags;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	while (rport->port_state == FC_PORTSTATE_BLOCKED &&
+	       !(rport->flags & FC_RPORT_FAST_FAIL_TIMEDOUT)) {
+		spin_unlock_irqrestore(shost->host_lock, flags);
+		msleep(1000);
+		spin_lock_irqsave(shost->host_lock, flags);
+	}
+	spin_unlock_irqrestore(shost->host_lock, flags);
+
+	if (rport->flags & FC_RPORT_FAST_FAIL_TIMEDOUT)
+		return FAST_IO_FAIL;
+
+	return 0;
+}
+EXPORT_SYMBOL(fc_block_rport);
 
 /**
  * fc_block_scsi_eh - Block SCSI eh thread for blocked fc_rport
@@ -3287,25 +3774,36 @@ fc_scsi_scan_rport(struct work_struct *work)
  */
 int fc_block_scsi_eh(struct scsi_cmnd *cmnd)
 {
-	struct Scsi_Host *shost = cmnd->device->host;
 	struct fc_rport *rport = starget_to_rport(scsi_target(cmnd->device));
-	unsigned long flags;
 
-	spin_lock_irqsave(shost->host_lock, flags);
-	while (rport->port_state == FC_PORTSTATE_BLOCKED &&
-	       !(rport->flags & FC_RPORT_FAST_FAIL_TIMEDOUT)) {
-		spin_unlock_irqrestore(shost->host_lock, flags);
-		msleep(1000);
-		spin_lock_irqsave(shost->host_lock, flags);
-	}
-	spin_unlock_irqrestore(shost->host_lock, flags);
-
-	if (rport->flags & FC_RPORT_FAST_FAIL_TIMEDOUT)
+	if (WARN_ON_ONCE(!rport))
 		return FAST_IO_FAIL;
 
-	return 0;
+	return fc_block_rport(rport);
 }
 EXPORT_SYMBOL(fc_block_scsi_eh);
+
+/*
+ * fc_eh_should_retry_cmd - Checks if the cmd should be retried or not
+ * @scmd:        The SCSI command to be checked
+ *
+ * This checks the rport state to decide if a cmd is
+ * retryable.
+ *
+ * Returns: true if the rport state is not in marginal state.
+ */
+bool fc_eh_should_retry_cmd(struct scsi_cmnd *scmd)
+{
+	struct fc_rport *rport = starget_to_rport(scsi_target(scmd->device));
+
+	if ((rport->port_state != FC_PORTSTATE_ONLINE) &&
+		(scsi_cmd_to_rq(scmd)->cmd_flags & REQ_FAILFAST_TRANSPORT)) {
+		set_host_byte(scmd, DID_TRANSPORT_MARGINAL);
+		return false;
+	}
+	return true;
+}
+EXPORT_SYMBOL_GPL(fc_eh_should_retry_cmd);
 
 /**
  * fc_vport_setup - allocates and creates a FC virtual port.
@@ -3317,7 +3815,7 @@ EXPORT_SYMBOL(fc_block_scsi_eh);
  * @ret_vport:	The pointer to the created vport.
  *
  * Allocates and creates the vport structure, calls the parent host
- * to instantiate the vport, the completes w/ class and sysfs creation.
+ * to instantiate the vport, this completes w/ class and sysfs creation.
  *
  * Notes:
  *	This routine assumes no locks are held on entry.
@@ -3397,7 +3895,7 @@ fc_vport_setup(struct Scsi_Host *shost, int channel, struct device *pdev,
 
 	/*
 	 * if the parent isn't the physical adapter's Scsi_Host, ensure
-	 * the Scsi_Host at least contains ia symlink to the vport.
+	 * the Scsi_Host at least contains a symlink to the vport.
 	 */
 	if (pdev != &shost->shost_gendev) {
 		error = sysfs_create_link(&shost->shost_gendev.kobj,
@@ -3546,7 +4044,7 @@ fc_vport_sched_delete(struct work_struct *work)
 static enum blk_eh_timer_return
 fc_bsg_job_timeout(struct request *req)
 {
-	struct bsg_job *job = (void *) req->special;
+	struct bsg_job *job = blk_mq_rq_to_pdu(req);
 	struct Scsi_Host *shost = fc_bsg_to_shost(job);
 	struct fc_rport *rport = fc_bsg_to_rport(job);
 	struct fc_internal *i = to_fc_internal(shost->transportt);
@@ -3569,10 +4067,9 @@ fc_bsg_job_timeout(struct request *req)
 	}
 
 	/* the blk_end_sync_io() doesn't check the error */
-	if (!inflight)
-		return BLK_EH_NOT_HANDLED;
-	else
-		return BLK_EH_HANDLED;
+	if (inflight)
+		blk_mq_end_request(req, BLK_STS_IOERR);
+	return BLK_EH_DONE;
 }
 
 /**
@@ -3663,14 +4160,9 @@ static void
 fc_bsg_goose_queue(struct fc_rport *rport)
 {
 	struct request_queue *q = rport->rqst_q;
-	unsigned long flags;
 
-	if (!q)
-		return;
-
-	spin_lock_irqsave(q->queue_lock, flags);
-	blk_run_queue_async(q);
-	spin_unlock_irqrestore(q->queue_lock, flags);
+	if (q)
+		blk_mq_run_hw_queues(q, true);
 }
 
 /**
@@ -3738,6 +4230,38 @@ static int fc_bsg_dispatch(struct bsg_job *job)
 		return fc_bsg_host_dispatch(shost, job);
 }
 
+static blk_status_t fc_bsg_rport_prep(struct fc_rport *rport)
+{
+	if (rport->port_state == FC_PORTSTATE_BLOCKED &&
+	    !(rport->flags & FC_RPORT_FAST_FAIL_TIMEDOUT))
+		return BLK_STS_RESOURCE;
+
+	if ((rport->port_state != FC_PORTSTATE_ONLINE) &&
+		(rport->port_state != FC_PORTSTATE_MARGINAL))
+		return BLK_STS_IOERR;
+
+	return BLK_STS_OK;
+}
+
+
+static int fc_bsg_dispatch_prep(struct bsg_job *job)
+{
+	struct fc_rport *rport = fc_bsg_to_rport(job);
+	blk_status_t ret;
+
+	ret = fc_bsg_rport_prep(rport);
+	switch (ret) {
+	case BLK_STS_OK:
+		break;
+	case BLK_STS_RESOURCE:
+		return -EAGAIN;
+	default:
+		return -EIO;
+	}
+
+	return fc_bsg_dispatch(job);
+}
+
 /**
  * fc_bsg_hostadd - Create and add the bsg hooks so we can receive requests
  * @shost:	shost for fc_host
@@ -3759,7 +4283,8 @@ fc_bsg_hostadd(struct Scsi_Host *shost, struct fc_host_attrs *fc_host)
 	snprintf(bsg_name, sizeof(bsg_name),
 		 "fc_host%d", shost->host_no);
 
-	q = bsg_setup_queue(dev, bsg_name, fc_bsg_dispatch, i->f->dd_bsg_size);
+	q = bsg_setup_queue(dev, bsg_name, fc_bsg_dispatch, fc_bsg_job_timeout,
+				i->f->dd_bsg_size);
 	if (IS_ERR(q)) {
 		dev_err(dev,
 			"fc_host%d: bsg interface failed to initialize - setup queue\n",
@@ -3767,24 +4292,9 @@ fc_bsg_hostadd(struct Scsi_Host *shost, struct fc_host_attrs *fc_host)
 		return PTR_ERR(q);
 	}
 	__scsi_init_queue(shost, q);
-	blk_queue_rq_timed_out(q, fc_bsg_job_timeout);
 	blk_queue_rq_timeout(q, FC_DEFAULT_BSG_TIMEOUT);
 	fc_host->rqst_q = q;
 	return 0;
-}
-
-static int fc_bsg_rport_prep(struct request_queue *q, struct request *req)
-{
-	struct fc_rport *rport = dev_to_rport(q->queuedata);
-
-	if (rport->port_state == FC_PORTSTATE_BLOCKED &&
-	    !(rport->flags & FC_RPORT_FAST_FAIL_TIMEDOUT))
-		return BLKPREP_DEFER;
-
-	if (rport->port_state != FC_PORTSTATE_ONLINE)
-		return BLKPREP_KILL;
-
-	return BLKPREP_OK;
 }
 
 /**
@@ -3804,14 +4314,13 @@ fc_bsg_rportadd(struct Scsi_Host *shost, struct fc_rport *rport)
 	if (!i->f->bsg_request)
 		return -ENOTSUPP;
 
-	q = bsg_setup_queue(dev, NULL, fc_bsg_dispatch, i->f->dd_bsg_size);
+	q = bsg_setup_queue(dev, dev_name(dev), fc_bsg_dispatch_prep,
+				fc_bsg_job_timeout, i->f->dd_bsg_size);
 	if (IS_ERR(q)) {
 		dev_err(dev, "failed to setup bsg queue\n");
 		return PTR_ERR(q);
 	}
 	__scsi_init_queue(shost, q);
-	blk_queue_prep_rq(q, fc_bsg_rport_prep);
-	blk_queue_rq_timed_out(q, fc_bsg_job_timeout);
 	blk_queue_rq_timeout(q, BLK_DEFAULT_SG_TIMEOUT);
 	rport->rqst_q = q;
 	return 0;
@@ -3830,10 +4339,7 @@ fc_bsg_rportadd(struct Scsi_Host *shost, struct fc_rport *rport)
 static void
 fc_bsg_remove(struct request_queue *q)
 {
-	if (q) {
-		bsg_unregister_queue(q);
-		blk_cleanup_queue(q);
-	}
+	bsg_remove_queue(q);
 }
 
 

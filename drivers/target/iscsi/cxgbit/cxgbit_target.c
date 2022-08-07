@@ -1,9 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2016 Chelsio Communications, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/workqueue.h>
@@ -89,8 +86,7 @@ static int cxgbit_is_ofld_imm(const struct sk_buff *skb)
 	if (likely(cxgbit_skcb_flags(skb) & SKCBF_TX_ISO))
 		length += sizeof(struct cpl_tx_data_iso);
 
-#define MAX_IMM_TX_PKT_LEN	256
-	return length <= MAX_IMM_TX_PKT_LEN;
+	return length <= MAX_IMM_OFLD_TX_DATA_WR_LEN;
 }
 
 /*
@@ -136,7 +132,7 @@ cxgbit_cpl_tx_data_iso(struct sk_buff *skb, struct cxgbit_iso_info *iso_info)
 	unsigned int fslice = !!(iso_info->flags & CXGBIT_ISO_FSLICE);
 	unsigned int lslice = !!(iso_info->flags & CXGBIT_ISO_LSLICE);
 
-	cpl = (struct cpl_tx_data_iso *)__skb_push(skb, sizeof(*cpl));
+	cpl = __skb_push(skb, sizeof(*cpl));
 
 	cpl->op_to_scsi = htonl(CPL_TX_DATA_ISO_OP_V(CPL_TX_DATA_ISO) |
 			CPL_TX_DATA_ISO_FIRST_V(fslice) |
@@ -183,8 +179,7 @@ cxgbit_tx_data_wr(struct cxgbit_sock *csk, struct sk_buff *skb, u32 dlen,
 	if (cxgbit_is_ofld_imm(skb))
 		immlen += dlen;
 
-	req = (struct fw_ofld_tx_data_wr *)__skb_push(skb,
-							hdr_size);
+	req = __skb_push(skb, hdr_size);
 	req->op_to_immdlen = cpu_to_be32(FW_WR_OP_V(opcode) |
 					FW_WR_COMPL_V(compl) |
 					FW_WR_IMMDLEN_V(immlen));
@@ -194,8 +189,8 @@ cxgbit_tx_data_wr(struct cxgbit_sock *csk, struct sk_buff *skb, u32 dlen,
 	wr_ulp_mode = FW_OFLD_TX_DATA_WR_ULPMODE_V(ULP_MODE_ISCSI) |
 				FW_OFLD_TX_DATA_WR_ULPSUBMODE_V(submode);
 
-	req->tunnel_to_proxy = htonl((wr_ulp_mode) | force |
-		 FW_OFLD_TX_DATA_WR_SHOVE_V(skb_peek(&csk->txq) ? 0 : 1));
+	req->tunnel_to_proxy = htonl(wr_ulp_mode | force |
+				     FW_OFLD_TX_DATA_WR_SHOVE_F);
 }
 
 static void cxgbit_arp_failure_skb_discard(void *handle, struct sk_buff *skb)
@@ -288,18 +283,6 @@ void cxgbit_push_tx_frames(struct cxgbit_sock *csk)
 	}
 }
 
-static bool cxgbit_lock_sock(struct cxgbit_sock *csk)
-{
-	spin_lock_bh(&csk->lock);
-
-	if (before(csk->write_seq, csk->snd_una + csk->snd_win))
-		csk->lock_owner = true;
-
-	spin_unlock_bh(&csk->lock);
-
-	return csk->lock_owner;
-}
-
 static void cxgbit_unlock_sock(struct cxgbit_sock *csk)
 {
 	struct sk_buff_head backlogq;
@@ -329,20 +312,16 @@ static int cxgbit_queue_skb(struct cxgbit_sock *csk, struct sk_buff *skb)
 {
 	int ret = 0;
 
-	wait_event_interruptible(csk->ack_waitq, cxgbit_lock_sock(csk));
+	spin_lock_bh(&csk->lock);
+	csk->lock_owner = true;
+	spin_unlock_bh(&csk->lock);
 
 	if (unlikely((csk->com.state != CSK_STATE_ESTABLISHED) ||
 		     signal_pending(current))) {
 		__kfree_skb(skb);
 		__skb_queue_purge(&csk->ppodq);
 		ret = -1;
-		spin_lock_bh(&csk->lock);
-		if (csk->lock_owner) {
-			spin_unlock_bh(&csk->lock);
-			goto unlock;
-		}
-		spin_unlock_bh(&csk->lock);
-		return ret;
+		goto unlock;
 	}
 
 	csk->write_seq += skb->len +
@@ -358,7 +337,7 @@ unlock:
 }
 
 static int
-cxgbit_map_skb(struct iscsi_cmd *cmd, struct sk_buff *skb, u32 data_offset,
+cxgbit_map_skb(struct iscsit_cmd *cmd, struct sk_buff *skb, u32 data_offset,
 	       u32 data_length)
 {
 	u32 i = 0, nr_frags = MAX_SKB_FRAGS;
@@ -411,10 +390,10 @@ cxgbit_map_skb(struct iscsi_cmd *cmd, struct sk_buff *skb, u32 data_offset,
 }
 
 static int
-cxgbit_tx_datain_iso(struct cxgbit_sock *csk, struct iscsi_cmd *cmd,
+cxgbit_tx_datain_iso(struct cxgbit_sock *csk, struct iscsit_cmd *cmd,
 		     struct iscsi_datain_req *dr)
 {
-	struct iscsi_conn *conn = csk->conn;
+	struct iscsit_conn *conn = csk->conn;
 	struct sk_buff *skb;
 	struct iscsi_datain datain;
 	struct cxgbit_iso_info iso_info;
@@ -502,7 +481,7 @@ out:
 }
 
 static int
-cxgbit_tx_datain(struct cxgbit_sock *csk, struct iscsi_cmd *cmd,
+cxgbit_tx_datain(struct cxgbit_sock *csk, struct iscsit_cmd *cmd,
 		 const struct iscsi_datain *datain)
 {
 	struct sk_buff *skb;
@@ -531,7 +510,7 @@ cxgbit_tx_datain(struct cxgbit_sock *csk, struct iscsi_cmd *cmd,
 }
 
 static int
-cxgbit_xmit_datain_pdu(struct iscsi_conn *conn, struct iscsi_cmd *cmd,
+cxgbit_xmit_datain_pdu(struct iscsit_conn *conn, struct iscsit_cmd *cmd,
 		       struct iscsi_datain_req *dr,
 		       const struct iscsi_datain *datain)
 {
@@ -551,7 +530,7 @@ cxgbit_xmit_datain_pdu(struct iscsi_conn *conn, struct iscsi_cmd *cmd,
 }
 
 static int
-cxgbit_xmit_nondatain_pdu(struct iscsi_conn *conn, struct iscsi_cmd *cmd,
+cxgbit_xmit_nondatain_pdu(struct iscsit_conn *conn, struct iscsit_cmd *cmd,
 			  const void *data_buf, u32 data_buf_len)
 {
 	struct cxgbit_sock *csk = conn->context;
@@ -581,7 +560,7 @@ cxgbit_xmit_nondatain_pdu(struct iscsi_conn *conn, struct iscsi_cmd *cmd,
 }
 
 int
-cxgbit_xmit_pdu(struct iscsi_conn *conn, struct iscsi_cmd *cmd,
+cxgbit_xmit_pdu(struct iscsit_conn *conn, struct iscsit_cmd *cmd,
 		struct iscsi_datain_req *dr, const void *buf, u32 buf_len)
 {
 	if (dr)
@@ -590,7 +569,7 @@ cxgbit_xmit_pdu(struct iscsi_conn *conn, struct iscsi_cmd *cmd,
 		return cxgbit_xmit_nondatain_pdu(conn, cmd, buf, buf_len);
 }
 
-int cxgbit_validate_params(struct iscsi_conn *conn)
+int cxgbit_validate_params(struct iscsit_conn *conn)
 {
 	struct cxgbit_sock *csk = conn->context;
 	struct cxgbit_device *cdev = csk->com.cdev;
@@ -616,7 +595,7 @@ int cxgbit_validate_params(struct iscsi_conn *conn)
 
 static int cxgbit_set_digest(struct cxgbit_sock *csk)
 {
-	struct iscsi_conn *conn = csk->conn;
+	struct iscsit_conn *conn = csk->conn;
 	struct iscsi_param *param;
 
 	param = iscsi_find_param_from_key(HEADERDIGEST, conn->param_list);
@@ -648,11 +627,12 @@ static int cxgbit_set_digest(struct cxgbit_sock *csk)
 
 static int cxgbit_set_iso_npdu(struct cxgbit_sock *csk)
 {
-	struct iscsi_conn *conn = csk->conn;
+	struct iscsit_conn *conn = csk->conn;
 	struct iscsi_conn_ops *conn_ops = conn->conn_ops;
 	struct iscsi_param *param;
 	u32 mrdsl, mbl;
 	u32 max_npdu, max_iso_npdu;
+	u32 max_iso_payload;
 
 	if (conn->login->leading_connection) {
 		param = iscsi_find_param_from_key(MAXBURSTLENGTH,
@@ -671,8 +651,10 @@ static int cxgbit_set_iso_npdu(struct cxgbit_sock *csk)
 	mrdsl = conn_ops->MaxRecvDataSegmentLength;
 	max_npdu = mbl / mrdsl;
 
-	max_iso_npdu = CXGBIT_MAX_ISO_PAYLOAD /
-			(ISCSI_HDR_LEN + mrdsl +
+	max_iso_payload = rounddown(CXGBIT_MAX_ISO_PAYLOAD, csk->emss);
+
+	max_iso_npdu = max_iso_payload /
+		       (ISCSI_HDR_LEN + mrdsl +
 			cxgbit_digest_len[csk->submode]);
 
 	csk->max_iso_npdu = min(max_npdu, max_iso_npdu);
@@ -696,7 +678,7 @@ static int cxgbit_set_iso_npdu(struct cxgbit_sock *csk)
  */
 static int cxgbit_seq_pdu_inorder(struct cxgbit_sock *csk)
 {
-	struct iscsi_conn *conn = csk->conn;
+	struct iscsit_conn *conn = csk->conn;
 	struct iscsi_param *param;
 
 	if (conn->login->leading_connection) {
@@ -730,7 +712,7 @@ static int cxgbit_seq_pdu_inorder(struct cxgbit_sock *csk)
 	return 0;
 }
 
-static int cxgbit_set_params(struct iscsi_conn *conn)
+static int cxgbit_set_params(struct iscsit_conn *conn)
 {
 	struct cxgbit_sock *csk = conn->context;
 	struct cxgbit_device *cdev = csk->com.cdev;
@@ -741,6 +723,9 @@ static int cxgbit_set_params(struct iscsi_conn *conn)
 
 	if (conn_ops->MaxRecvDataSegmentLength > cdev->mdsl)
 		conn_ops->MaxRecvDataSegmentLength = cdev->mdsl;
+
+	if (cxgbit_set_digest(csk))
+		return -1;
 
 	if (conn->login->leading_connection) {
 		param = iscsi_find_param_from_key(ERRORRECOVERYLEVEL,
@@ -765,7 +750,7 @@ static int cxgbit_set_params(struct iscsi_conn *conn)
 			if (is_t5(cdev->lldi.adapter_type))
 				goto enable_ddp;
 			else
-				goto enable_digest;
+				return 0;
 		}
 
 		if (test_bit(CDEV_ISO_ENABLE, &cdev->flags)) {
@@ -782,15 +767,11 @@ enable_ddp:
 		}
 	}
 
-enable_digest:
-	if (cxgbit_set_digest(csk))
-		return -1;
-
 	return 0;
 }
 
 int
-cxgbit_put_login_tx(struct iscsi_conn *conn, struct iscsi_login *login,
+cxgbit_put_login_tx(struct iscsit_conn *conn, struct iscsi_login *login,
 		    u32 length)
 {
 	struct cxgbit_sock *csk = conn->context;
@@ -828,7 +809,7 @@ cxgbit_put_login_tx(struct iscsi_conn *conn, struct iscsi_login *login,
 
 static void
 cxgbit_skb_copy_to_sg(struct sk_buff *skb, struct scatterlist *sg,
-		      unsigned int nents)
+		      unsigned int nents, u32 skip)
 {
 	struct skb_seq_state st;
 	const u8 *buf;
@@ -847,20 +828,20 @@ cxgbit_skb_copy_to_sg(struct sk_buff *skb, struct scatterlist *sg,
 		}
 
 		consumed += sg_pcopy_from_buffer(sg, nents, (void *)buf,
-						 buf_len, consumed);
+						 buf_len, skip + consumed);
 	}
 }
 
-static struct iscsi_cmd *cxgbit_allocate_cmd(struct cxgbit_sock *csk)
+static struct iscsit_cmd *cxgbit_allocate_cmd(struct cxgbit_sock *csk)
 {
-	struct iscsi_conn *conn = csk->conn;
+	struct iscsit_conn *conn = csk->conn;
 	struct cxgbi_ppm *ppm = cdev2ppm(csk->com.cdev);
 	struct cxgbit_cmd *ccmd;
-	struct iscsi_cmd *cmd;
+	struct iscsit_cmd *cmd;
 
 	cmd = iscsit_allocate_cmd(conn, TASK_INTERRUPTIBLE);
 	if (!cmd) {
-		pr_err("Unable to allocate iscsi_cmd + cxgbit_cmd\n");
+		pr_err("Unable to allocate iscsit_cmd + cxgbit_cmd\n");
 		return NULL;
 	}
 
@@ -872,10 +853,10 @@ static struct iscsi_cmd *cxgbit_allocate_cmd(struct cxgbit_sock *csk)
 }
 
 static int
-cxgbit_handle_immediate_data(struct iscsi_cmd *cmd, struct iscsi_scsi_req *hdr,
+cxgbit_handle_immediate_data(struct iscsit_cmd *cmd, struct iscsi_scsi_req *hdr,
 			     u32 length)
 {
-	struct iscsi_conn *conn = cmd->conn;
+	struct iscsit_conn *conn = cmd->conn;
 	struct cxgbit_sock *csk = conn->context;
 	struct cxgbit_lro_pdu_cb *pdu_cb = cxgbit_rx_pdu_cb(csk->skb);
 
@@ -901,9 +882,9 @@ cxgbit_handle_immediate_data(struct iscsi_cmd *cmd, struct iscsi_scsi_req *hdr,
 		skb_frag_t *dfrag = &ssi->frags[pdu_cb->dfrag_idx];
 
 		sg_init_table(&ccmd->sg, 1);
-		sg_set_page(&ccmd->sg, dfrag->page.p, skb_frag_size(dfrag),
-			    dfrag->page_offset);
-		get_page(dfrag->page.p);
+		sg_set_page(&ccmd->sg, skb_frag_page(dfrag),
+				skb_frag_size(dfrag), skb_frag_off(dfrag));
+		get_page(skb_frag_page(dfrag));
 
 		cmd->se_cmd.t_data_sg = &ccmd->sg;
 		cmd->se_cmd.t_data_nents = 1;
@@ -913,7 +894,7 @@ cxgbit_handle_immediate_data(struct iscsi_cmd *cmd, struct iscsi_scsi_req *hdr,
 		struct scatterlist *sg = &cmd->se_cmd.t_data_sg[0];
 		u32 sg_nents = max(1UL, DIV_ROUND_UP(pdu_cb->dlen, PAGE_SIZE));
 
-		cxgbit_skb_copy_to_sg(csk->skb, sg, sg_nents);
+		cxgbit_skb_copy_to_sg(csk->skb, sg, sg_nents, 0);
 	}
 
 	cmd->write_data_done += pdu_cb->dlen;
@@ -929,10 +910,10 @@ cxgbit_handle_immediate_data(struct iscsi_cmd *cmd, struct iscsi_scsi_req *hdr,
 }
 
 static int
-cxgbit_get_immediate_data(struct iscsi_cmd *cmd, struct iscsi_scsi_req *hdr,
+cxgbit_get_immediate_data(struct iscsit_cmd *cmd, struct iscsi_scsi_req *hdr,
 			  bool dump_payload)
 {
-	struct iscsi_conn *conn = cmd->conn;
+	struct iscsit_conn *conn = cmd->conn;
 	int cmdsn_ret = 0, immed_ret = IMMEDIATE_DATA_NORMAL_OPERATION;
 	/*
 	 * Special case for Unsupported SAM WRITE Opcodes and ImmediateData=Yes.
@@ -959,7 +940,7 @@ after_immediate_data:
 			target_put_sess_cmd(&cmd->se_cmd);
 			return 0;
 		} else if (cmd->unsolicited_data) {
-			iscsit_set_unsoliticed_dataout(cmd);
+			iscsit_set_unsolicited_dataout(cmd);
 		}
 
 	} else if (immed_ret == IMMEDIATE_DATA_ERL1_CRC_FAILURE) {
@@ -983,9 +964,9 @@ after_immediate_data:
 }
 
 static int
-cxgbit_handle_scsi_cmd(struct cxgbit_sock *csk, struct iscsi_cmd *cmd)
+cxgbit_handle_scsi_cmd(struct cxgbit_sock *csk, struct iscsit_cmd *cmd)
 {
-	struct iscsi_conn *conn = csk->conn;
+	struct iscsit_conn *conn = csk->conn;
 	struct cxgbit_lro_pdu_cb *pdu_cb = cxgbit_rx_pdu_cb(csk->skb);
 	struct iscsi_scsi_req *hdr = (struct iscsi_scsi_req *)pdu_cb->hdr;
 	int rc;
@@ -1014,19 +995,20 @@ cxgbit_handle_scsi_cmd(struct cxgbit_sock *csk, struct iscsi_cmd *cmd)
 static int cxgbit_handle_iscsi_dataout(struct cxgbit_sock *csk)
 {
 	struct scatterlist *sg_start;
-	struct iscsi_conn *conn = csk->conn;
-	struct iscsi_cmd *cmd = NULL;
+	struct iscsit_conn *conn = csk->conn;
+	struct iscsit_cmd *cmd = NULL;
+	struct cxgbit_cmd *ccmd;
+	struct cxgbi_task_tag_info *ttinfo;
 	struct cxgbit_lro_pdu_cb *pdu_cb = cxgbit_rx_pdu_cb(csk->skb);
 	struct iscsi_data *hdr = (struct iscsi_data *)pdu_cb->hdr;
 	u32 data_offset = be32_to_cpu(hdr->offset);
-	u32 data_len = pdu_cb->dlen;
+	u32 data_len = ntoh24(hdr->dlength);
 	int rc, sg_nents, sg_off;
 	bool dcrc_err = false;
 
 	if (pdu_cb->flags & PDUCBF_RX_DDP_CMP) {
 		u32 offset = be32_to_cpu(hdr->offset);
 		u32 ddp_data_len;
-		u32 payload_length = ntoh24(hdr->dlength);
 		bool success = false;
 
 		cmd = iscsit_find_cmd_from_itt_or_dump(conn, hdr->itt, 0);
@@ -1041,7 +1023,7 @@ static int cxgbit_handle_iscsi_dataout(struct cxgbit_sock *csk)
 		cmd->data_sn = be32_to_cpu(hdr->datasn);
 
 		rc = __iscsit_check_dataout_hdr(conn, (unsigned char *)hdr,
-						cmd, payload_length, &success);
+						cmd, data_len, &success);
 		if (rc < 0)
 			return rc;
 		else if (!success)
@@ -1070,11 +1052,27 @@ static int cxgbit_handle_iscsi_dataout(struct cxgbit_sock *csk)
 		  cmd->se_cmd.data_length);
 
 	if (!(pdu_cb->flags & PDUCBF_RX_DATA_DDPD)) {
+		u32 skip = data_offset % PAGE_SIZE;
+
 		sg_off = data_offset / PAGE_SIZE;
 		sg_start = &cmd->se_cmd.t_data_sg[sg_off];
-		sg_nents = max(1UL, DIV_ROUND_UP(data_len, PAGE_SIZE));
+		sg_nents = max(1UL, DIV_ROUND_UP(skip + data_len, PAGE_SIZE));
 
-		cxgbit_skb_copy_to_sg(csk->skb, sg_start, sg_nents);
+		cxgbit_skb_copy_to_sg(csk->skb, sg_start, sg_nents, skip);
+	}
+
+	ccmd = iscsit_priv_cmd(cmd);
+	ttinfo = &ccmd->ttinfo;
+
+	if (ccmd->release && ttinfo->sgl &&
+	    (cmd->se_cmd.data_length ==	(cmd->write_data_done + data_len))) {
+		struct cxgbit_device *cdev = csk->com.cdev;
+		struct cxgbi_ppm *ppm = cdev2ppm(cdev);
+
+		dma_unmap_sg(&ppm->pdev->dev, ttinfo->sgl, ttinfo->nents,
+			     DMA_FROM_DEVICE);
+		ttinfo->nents = 0;
+		ttinfo->sgl = NULL;
 	}
 
 check_payload:
@@ -1086,9 +1084,9 @@ check_payload:
 	return 0;
 }
 
-static int cxgbit_handle_nop_out(struct cxgbit_sock *csk, struct iscsi_cmd *cmd)
+static int cxgbit_handle_nop_out(struct cxgbit_sock *csk, struct iscsit_cmd *cmd)
 {
-	struct iscsi_conn *conn = csk->conn;
+	struct iscsit_conn *conn = csk->conn;
 	struct cxgbit_lro_pdu_cb *pdu_cb = cxgbit_rx_pdu_cb(csk->skb);
 	struct iscsi_nopout *hdr = (struct iscsi_nopout *)pdu_cb->hdr;
 	unsigned char *ping_data = NULL;
@@ -1136,7 +1134,7 @@ static int cxgbit_handle_nop_out(struct cxgbit_sock *csk, struct iscsi_cmd *cmd)
 
 		ping_data[payload_length] = '\0';
 		/*
-		 * Attach ping data to struct iscsi_cmd->buf_ptr.
+		 * Attach ping data to struct iscsit_cmd->buf_ptr.
 		 */
 		cmd->buf_ptr = ping_data;
 		cmd->buf_ptr_size = payload_length;
@@ -1154,9 +1152,9 @@ out:
 }
 
 static int
-cxgbit_handle_text_cmd(struct cxgbit_sock *csk, struct iscsi_cmd *cmd)
+cxgbit_handle_text_cmd(struct cxgbit_sock *csk, struct iscsit_cmd *cmd)
 {
-	struct iscsi_conn *conn = csk->conn;
+	struct iscsit_conn *conn = csk->conn;
 	struct cxgbit_lro_pdu_cb *pdu_cb = cxgbit_rx_pdu_cb(csk->skb);
 	struct iscsi_text *hdr = (struct iscsi_text *)pdu_cb->hdr;
 	u32 payload_length = pdu_cb->dlen;
@@ -1211,8 +1209,8 @@ static int cxgbit_target_rx_opcode(struct cxgbit_sock *csk)
 {
 	struct cxgbit_lro_pdu_cb *pdu_cb = cxgbit_rx_pdu_cb(csk->skb);
 	struct iscsi_hdr *hdr = (struct iscsi_hdr *)pdu_cb->hdr;
-	struct iscsi_conn *conn = csk->conn;
-	struct iscsi_cmd *cmd = NULL;
+	struct iscsit_conn *conn = csk->conn;
+	struct iscsit_cmd *cmd = NULL;
 	u8 opcode = (hdr->opcode & ISCSI_OPCODE_MASK);
 	int ret = -EINVAL;
 
@@ -1288,7 +1286,7 @@ reject:
 static int cxgbit_rx_opcode(struct cxgbit_sock *csk)
 {
 	struct cxgbit_lro_pdu_cb *pdu_cb = cxgbit_rx_pdu_cb(csk->skb);
-	struct iscsi_conn *conn = csk->conn;
+	struct iscsit_conn *conn = csk->conn;
 	struct iscsi_hdr *hdr = pdu_cb->hdr;
 	u8 opcode;
 
@@ -1323,7 +1321,7 @@ transport_err:
 
 static int cxgbit_rx_login_pdu(struct cxgbit_sock *csk)
 {
-	struct iscsi_conn *conn = csk->conn;
+	struct iscsit_conn *conn = csk->conn;
 	struct iscsi_login *login = conn->login;
 	struct cxgbit_lro_pdu_cb *pdu_cb = cxgbit_rx_pdu_cb(csk->skb);
 	struct iscsi_login_req *login_req;
@@ -1403,7 +1401,8 @@ static void cxgbit_lro_skb_dump(struct sk_buff *skb)
 			pdu_cb->ddigest, pdu_cb->frags);
 	for (i = 0; i < ssi->nr_frags; i++)
 		pr_info("skb 0x%p, frag %d, off %u, sz %u.\n",
-			skb, i, ssi->frags[i].page_offset, ssi->frags[i].size);
+			skb, i, skb_frag_off(&ssi->frags[i]),
+			skb_frag_size(&ssi->frags[i]));
 }
 
 static void cxgbit_lro_hskb_reset(struct cxgbit_sock *csk)
@@ -1447,7 +1446,7 @@ cxgbit_lro_skb_merge(struct cxgbit_sock *csk, struct sk_buff *skb, u8 pdu_idx)
 		hpdu_cb->frags++;
 		hpdu_cb->hfrag_idx = hfrag_idx;
 
-		len = hssi->frags[hfrag_idx].size;
+		len = skb_frag_size(&hssi->frags[hfrag_idx]);
 		hskb->len += len;
 		hskb->data_len += len;
 		hskb->truesize += len;
@@ -1467,7 +1466,7 @@ cxgbit_lro_skb_merge(struct cxgbit_sock *csk, struct sk_buff *skb, u8 pdu_idx)
 
 			get_page(skb_frag_page(&hssi->frags[dfrag_idx]));
 
-			len += hssi->frags[dfrag_idx].size;
+			len += skb_frag_size(&hssi->frags[dfrag_idx]);
 
 			hssi->nr_frags++;
 			hpdu_cb->frags++;
@@ -1532,7 +1531,7 @@ out:
 	return ret;
 }
 
-static int cxgbit_rx_lro_skb(struct cxgbit_sock *csk, struct sk_buff *skb)
+static int cxgbit_t5_rx_lro_skb(struct cxgbit_sock *csk, struct sk_buff *skb)
 {
 	struct cxgbit_lro_cb *lro_cb = cxgbit_skb_lro_cb(skb);
 	struct cxgbit_lro_pdu_cb *pdu_cb = cxgbit_skb_lro_pdu_cb(skb, 0);
@@ -1558,6 +1557,24 @@ static int cxgbit_rx_lro_skb(struct cxgbit_sock *csk, struct sk_buff *skb)
 	return ret;
 }
 
+static int cxgbit_rx_lro_skb(struct cxgbit_sock *csk, struct sk_buff *skb)
+{
+	struct cxgbit_lro_cb *lro_cb = cxgbit_skb_lro_cb(skb);
+	int ret;
+
+	ret = cxgbit_process_lro_skb(csk, skb);
+	if (ret)
+		return ret;
+
+	csk->rx_credits += lro_cb->pdu_totallen;
+	if (csk->rx_credits >= csk->rcv_win) {
+		csk->rx_credits = 0;
+		cxgbit_rx_data_ack(csk);
+	}
+
+	return 0;
+}
+
 static int cxgbit_rx_skb(struct cxgbit_sock *csk, struct sk_buff *skb)
 {
 	struct cxgb4_lld_info *lldi = &csk->com.cdev->lldi;
@@ -1565,9 +1582,9 @@ static int cxgbit_rx_skb(struct cxgbit_sock *csk, struct sk_buff *skb)
 
 	if (likely(cxgbit_skcb_flags(skb) & SKCBF_RX_LRO)) {
 		if (is_t5(lldi->adapter_type))
-			ret = cxgbit_rx_lro_skb(csk, skb);
+			ret = cxgbit_t5_rx_lro_skb(csk, skb);
 		else
-			ret = cxgbit_process_lro_skb(csk, skb);
+			ret = cxgbit_rx_lro_skb(csk, skb);
 	}
 
 	__kfree_skb(skb);
@@ -1609,7 +1626,7 @@ out:
 	return -1;
 }
 
-int cxgbit_get_login_rx(struct iscsi_conn *conn, struct iscsi_login *login)
+int cxgbit_get_login_rx(struct iscsit_conn *conn, struct iscsi_login *login)
 {
 	struct cxgbit_sock *csk = conn->context;
 	int ret = -1;
@@ -1625,7 +1642,7 @@ int cxgbit_get_login_rx(struct iscsi_conn *conn, struct iscsi_login *login)
 	return ret;
 }
 
-void cxgbit_get_rx_pdu(struct iscsi_conn *conn)
+void cxgbit_get_rx_pdu(struct iscsit_conn *conn)
 {
 	struct cxgbit_sock *csk = conn->context;
 

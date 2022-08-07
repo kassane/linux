@@ -9,7 +9,9 @@ Designs and Implementations
    compress-offload
    timestamping
    jack-controls
+   tracepoints
    procfile
    powersave
    oss-emulation
    seq-oss
+   jack-injection

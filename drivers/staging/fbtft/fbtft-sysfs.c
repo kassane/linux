@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 #include "fbtft.h"
 #include "internal.h"
 
@@ -17,13 +18,14 @@ static int get_next_ulong(char **str_p, unsigned long *val, char *sep, int base)
 }
 
 int fbtft_gamma_parse_str(struct fbtft_par *par, u32 *curves,
-						const char *str, int size)
+			  const char *str, int size)
 {
 	char *str_p, *curve_p = NULL;
 	char *tmp;
 	unsigned long val = 0;
 	int ret = 0;
 	int curve_counter, value_counter;
+	int _count;
 
 	fbtft_par_dbg(DEBUG_SYSFS, par, "%s() str=\n", __func__);
 
@@ -67,7 +69,10 @@ int fbtft_gamma_parse_str(struct fbtft_par *par, u32 *curves,
 			ret = get_next_ulong(&curve_p, &val, " ", 16);
 			if (ret)
 				goto out;
-			curves[curve_counter * par->gamma.num_values + value_counter] = val;
+
+			_count = curve_counter * par->gamma.num_values +
+				 value_counter;
+			curves[_count] = val;
 			value_counter++;
 		}
 		if (value_counter != par->gamma.num_values) {
@@ -107,8 +112,8 @@ sprintf_gamma(struct fbtft_par *par, u32 *curves, char *buf)
 }
 
 static ssize_t store_gamma_curve(struct device *device,
-					struct device_attribute *attr,
-					const char *buf, size_t count)
+				 struct device_attribute *attr,
+				 const char *buf, size_t count)
 {
 	struct fb_info *fb_info = dev_get_drvdata(device);
 	struct fbtft_par *par = fb_info->par;
@@ -125,7 +130,8 @@ static ssize_t store_gamma_curve(struct device *device,
 
 	mutex_lock(&par->gamma.lock);
 	memcpy(par->gamma.curves, tmp_curves,
-		par->gamma.num_curves * par->gamma.num_values * sizeof(tmp_curves[0]));
+	       par->gamma.num_curves * par->gamma.num_values *
+	       sizeof(tmp_curves[0]));
 	mutex_unlock(&par->gamma.lock);
 
 	return count;
@@ -172,8 +178,8 @@ void fbtft_expand_debug_value(unsigned long *debug)
 }
 
 static ssize_t store_debug(struct device *device,
-				struct device_attribute *attr,
-				const char *buf, size_t count)
+			   struct device_attribute *attr,
+			   const char *buf, size_t count)
 {
 	struct fb_info *fb_info = dev_get_drvdata(device);
 	struct fbtft_par *par = fb_info->par;
@@ -188,15 +194,15 @@ static ssize_t store_debug(struct device *device,
 }
 
 static ssize_t show_debug(struct device *device,
-				struct device_attribute *attr, char *buf)
+			  struct device_attribute *attr, char *buf)
 {
 	struct fb_info *fb_info = dev_get_drvdata(device);
 	struct fbtft_par *par = fb_info->par;
 
-	return snprintf(buf, PAGE_SIZE, "%lu\n", par->debug);
+	return sysfs_emit(buf, "%lu\n", par->debug);
 }
 
-static struct device_attribute debug_device_attr = \
+static struct device_attribute debug_device_attr =
 	__ATTR(debug, 0660, show_debug, store_debug);
 
 void fbtft_sysfs_init(struct fbtft_par *par)

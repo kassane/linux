@@ -62,6 +62,16 @@
  */
 #define AR9300_PWR_TABLE_OFFSET  0
 
+/* Noise power data definitions
+ * units are: 4 x dBm - NOISE_PWR_DATA_OFFSET
+ * (e.g. -25 = (-25/4 - 90) = -96.25 dBm)
+ * range (for 6 signed bits) is (-32 to 31) + offset => -122dBm to -59dBm
+ * resolution (2 bits) is 0.25dBm
+ */
+#define NOISE_PWR_DATA_OFFSET	-90
+#define NOISE_PWR_DBM_2_INT(_p)	((((_p) + 3) >> 2) + NOISE_PWR_DATA_OFFSET)
+#define N2DBM(_p)		NOISE_PWR_DBM_2_INT(_p)
+
 /* byte addressable */
 #define AR9300_EEPROM_SIZE (16*1024)
 
@@ -353,6 +363,8 @@ u32 ar9003_hw_ant_ctrl_common_2_get(struct ath_hw *ah, bool is2ghz);
 
 u8 *ar9003_get_spur_chan_ptr(struct ath_hw *ah, bool is_2ghz);
 
+u32 ar9003_get_paprd_rate_mask_ht20(struct ath_hw *ah, bool is2ghz);
+u32 ar9003_get_paprd_rate_mask_ht40(struct ath_hw *ah, bool is2ghz);
 unsigned int ar9003_get_paprd_scale_factor(struct ath_hw *ah,
 					   struct ath9k_channel *chan);
 

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 
 #ifndef _SLIC_H
 #define _SLIC_H
@@ -7,7 +8,6 @@
 #include <linux/spinlock_types.h>
 #include <linux/dma-mapping.h>
 #include <linux/pci.h>
-#include <linux/netdevice.h>
 #include <linux/list.h>
 #include <linux/u64_stats_sync.h>
 
@@ -264,8 +264,6 @@
 
 #define SLIC_NUM_STAT_DESC_ARRAYS	4
 #define SLIC_INVALID_STAT_DESC_IDX	0xffffffff
-
-#define SLIC_NAPI_WEIGHT		64
 
 #define SLIC_UPR_LSTAT			0
 #define SLIC_UPR_CONFIG			1

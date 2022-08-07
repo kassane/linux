@@ -374,6 +374,7 @@ static int finish_dma_single(struct cvm_mmc_host *host, struct mmc_data *data)
 {
 	data->bytes_xfered = data->blocks * data->blksz;
 	data->error = 0;
+	dma_unmap_sg(host->dev, data->sg, data->sg_len, get_dma_dir(data));
 	return 1;
 }
 
@@ -435,12 +436,11 @@ irqreturn_t cvm_mmc_interrupt(int irq, void *dev_id)
 {
 	struct cvm_mmc_host *host = dev_id;
 	struct mmc_request *req;
-	unsigned long flags = 0;
 	u64 emm_int, rsp_sts;
 	bool host_done;
 
 	if (host->need_irq_handler_lock)
-		spin_lock_irqsave(&host->irq_handler_lock, flags);
+		spin_lock(&host->irq_handler_lock);
 	else
 		__acquire(&host->irq_handler_lock);
 
@@ -503,7 +503,7 @@ no_req_done:
 		host->release_bus(host);
 out:
 	if (host->need_irq_handler_lock)
-		spin_unlock_irqrestore(&host->irq_handler_lock, flags);
+		spin_unlock(&host->irq_handler_lock);
 	else
 		__release(&host->irq_handler_lock);
 	return IRQ_RETVAL(emm_int != 0);
@@ -656,8 +656,7 @@ static void cvm_mmc_dma_request(struct mmc_host *mmc,
 
 	if (!mrq->data || !mrq->data->sg || !mrq->data->sg_len ||
 	    !mrq->stop || mrq->stop->opcode != MMC_STOP_TRANSMISSION) {
-		dev_err(&mmc->card->dev,
-			"Error: cmv_mmc_dma_request no data\n");
+		dev_err(&mmc->card->dev, "Error: %s no data\n", __func__);
 		goto error;
 	}
 
@@ -839,14 +838,14 @@ static void cvm_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		cvm_mmc_reset_bus(slot);
 		if (host->global_pwr_gpiod)
 			host->set_shared_power(host, 0);
-		else
+		else if (!IS_ERR(mmc->supply.vmmc))
 			mmc_regulator_set_ocr(mmc, mmc->supply.vmmc, 0);
 		break;
 
 	case MMC_POWER_UP:
 		if (host->global_pwr_gpiod)
 			host->set_shared_power(host, 1);
-		else
+		else if (!IS_ERR(mmc->supply.vmmc))
 			mmc_regulator_set_ocr(mmc, mmc->supply.vmmc, ios->vdd);
 		break;
 	}
@@ -957,31 +956,24 @@ static int cvm_mmc_of_parse(struct device *dev, struct cvm_mmc_slot *slot)
 
 	ret = of_property_read_u32(node, "reg", &id);
 	if (ret) {
-		dev_err(dev, "Missing or invalid reg property on %s\n",
-			of_node_full_name(node));
+		dev_err(dev, "Missing or invalid reg property on %pOF\n", node);
 		return ret;
 	}
 
 	if (id >= CAVIUM_MAX_MMC || slot->host->slot[id]) {
-		dev_err(dev, "Invalid reg property on %s\n",
-			of_node_full_name(node));
+		dev_err(dev, "Invalid reg property on %pOF\n", node);
 		return -EINVAL;
 	}
 
-	mmc->supply.vmmc = devm_regulator_get_optional(dev, "vmmc");
-	if (IS_ERR(mmc->supply.vmmc)) {
-		if (PTR_ERR(mmc->supply.vmmc) == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
-		/*
-		 * Legacy Octeon firmware has no regulator entry, fall-back to
-		 * a hard-coded voltage to get a sane OCR.
-		 */
+	ret = mmc_regulator_get_supply(mmc);
+	if (ret)
+		return ret;
+	/*
+	 * Legacy Octeon firmware has no regulator entry, fall-back to
+	 * a hard-coded voltage to get a sane OCR.
+	 */
+	if (IS_ERR(mmc->supply.vmmc))
 		mmc->ocr_avail = MMC_VDD_32_33 | MMC_VDD_33_34;
-	} else {
-		ret = mmc_regulator_get_ocrmask(mmc->supply.vmmc);
-		if (ret > 0)
-			mmc->ocr_avail = ret;
-	}
 
 	/* Common MMC bindings */
 	ret = mmc_of_parse(mmc);
@@ -1040,10 +1032,11 @@ int cvm_mmc_of_slot_probe(struct device *dev, struct cvm_mmc_host *host)
 	 * We only have a 3.3v supply, we cannot support any
 	 * of the UHS modes. We do support the high speed DDR
 	 * modes up to 52MHz.
+	 *
+	 * Disable bounce buffers for max_segs = 1
 	 */
 	mmc->caps |= MMC_CAP_MMC_HIGHSPEED | MMC_CAP_SD_HIGHSPEED |
-		     MMC_CAP_ERASE | MMC_CAP_CMD23 | MMC_CAP_POWER_OFF_CARD |
-		     MMC_CAP_3_3V_DDR;
+		     MMC_CAP_CMD23 | MMC_CAP_POWER_OFF_CARD | MMC_CAP_3_3V_DDR;
 
 	if (host->use_sg)
 		mmc->max_segs = 16;
@@ -1051,7 +1044,8 @@ int cvm_mmc_of_slot_probe(struct device *dev, struct cvm_mmc_host *host)
 		mmc->max_segs = 1;
 
 	/* DMA size field can address up to 8 MB */
-	mmc->max_seg_size = 8 * 1024 * 1024;
+	mmc->max_seg_size = min_t(unsigned int, 8 * 1024 * 1024,
+				  dma_get_max_seg_size(host->dev));
 	mmc->max_req_size = mmc->max_seg_size;
 	/* External DMA is in 512 byte blocks */
 	mmc->max_blk_size = 512;

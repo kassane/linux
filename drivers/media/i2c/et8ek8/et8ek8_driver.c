@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * et8ek8_driver.c
  *
@@ -11,15 +12,6 @@
  *
  * This driver is based on the Micron MT9T012 camera imager driver
  * (C) Texas Instruments.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 
 #include <linux/clk.h>
@@ -43,7 +35,7 @@
 
 #define ET8EK8_NAME		"et8ek8"
 #define ET8EK8_PRIV_MEM_SIZE	128
-#define ET8EK8_MAX_MSG		48
+#define ET8EK8_MAX_MSG		8
 
 struct et8ek8_sensor {
 	struct v4l2_subdev subdev;
@@ -220,7 +212,8 @@ static void et8ek8_i2c_create_msg(struct i2c_client *client, u16 len, u16 reg,
 
 /*
  * A buffered write method that puts the wanted register write
- * commands in a message list and passes the list to the i2c framework
+ * commands in smaller number of message lists and passes the lists to
+ * the i2c framework
  */
 static int et8ek8_i2c_buffered_write_regs(struct i2c_client *client,
 					  const struct et8ek8_reg *wnext,
@@ -231,11 +224,7 @@ static int et8ek8_i2c_buffered_write_regs(struct i2c_client *client,
 	int wcnt = 0;
 	u16 reg, data_length;
 	u32 val;
-
-	if (WARN_ONCE(cnt > ET8EK8_MAX_MSG,
-		      ET8EK8_NAME ": %s: too many messages.\n", __func__)) {
-		return -EINVAL;
-	}
+	int rval;
 
 	/* Create new write messages for all writes */
 	while (wcnt < cnt) {
@@ -249,10 +238,21 @@ static int et8ek8_i2c_buffered_write_regs(struct i2c_client *client,
 
 		/* Update write count */
 		wcnt++;
+
+		if (wcnt < ET8EK8_MAX_MSG)
+			continue;
+
+		rval = i2c_transfer(client->adapter, msg, wcnt);
+		if (rval < 0)
+			return rval;
+
+		cnt -= wcnt;
+		wcnt = 0;
 	}
 
-	/* Now we send everything ... */
-	return i2c_transfer(client->adapter, msg, wcnt);
+	rval = i2c_transfer(client->adapter, msg, wcnt);
+
+	return rval < 0 ? rval : 0;
 }
 
 /*
@@ -882,7 +882,7 @@ out:
  */
 #define MAX_FMTS 4
 static int et8ek8_enum_mbus_code(struct v4l2_subdev *subdev,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct et8ek8_reglist **list =
@@ -920,7 +920,7 @@ static int et8ek8_enum_mbus_code(struct v4l2_subdev *subdev,
 }
 
 static int et8ek8_enum_frame_size(struct v4l2_subdev *subdev,
-				  struct v4l2_subdev_pad_config *cfg,
+				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct et8ek8_reglist **list =
@@ -958,7 +958,7 @@ static int et8ek8_enum_frame_size(struct v4l2_subdev *subdev,
 }
 
 static int et8ek8_enum_frame_ival(struct v4l2_subdev *subdev,
-				  struct v4l2_subdev_pad_config *cfg,
+				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_frame_interval_enum *fie)
 {
 	struct et8ek8_reglist **list =
@@ -990,12 +990,13 @@ static int et8ek8_enum_frame_ival(struct v4l2_subdev *subdev,
 
 static struct v4l2_mbus_framefmt *
 __et8ek8_get_pad_format(struct et8ek8_sensor *sensor,
-			struct v4l2_subdev_pad_config *cfg,
+			struct v4l2_subdev_state *sd_state,
 			unsigned int pad, enum v4l2_subdev_format_whence which)
 {
 	switch (which) {
 	case V4L2_SUBDEV_FORMAT_TRY:
-		return v4l2_subdev_get_try_format(&sensor->subdev, cfg, pad);
+		return v4l2_subdev_get_try_format(&sensor->subdev, sd_state,
+						  pad);
 	case V4L2_SUBDEV_FORMAT_ACTIVE:
 		return &sensor->format;
 	default:
@@ -1004,13 +1005,14 @@ __et8ek8_get_pad_format(struct et8ek8_sensor *sensor,
 }
 
 static int et8ek8_get_pad_format(struct v4l2_subdev *subdev,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
 {
 	struct et8ek8_sensor *sensor = to_et8ek8_sensor(subdev);
 	struct v4l2_mbus_framefmt *format;
 
-	format = __et8ek8_get_pad_format(sensor, cfg, fmt->pad, fmt->which);
+	format = __et8ek8_get_pad_format(sensor, sd_state, fmt->pad,
+					 fmt->which);
 	if (!format)
 		return -EINVAL;
 
@@ -1020,14 +1022,15 @@ static int et8ek8_get_pad_format(struct v4l2_subdev *subdev,
 }
 
 static int et8ek8_set_pad_format(struct v4l2_subdev *subdev,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
 {
 	struct et8ek8_sensor *sensor = to_et8ek8_sensor(subdev);
 	struct v4l2_mbus_framefmt *format;
 	struct et8ek8_reglist *reglist;
 
-	format = __et8ek8_get_pad_format(sensor, cfg, fmt->pad, fmt->which);
+	format = __et8ek8_get_pad_format(sensor, sd_state, fmt->pad,
+					 fmt->which);
 	if (!format)
 		return -EINVAL;
 
@@ -1234,10 +1237,9 @@ out_poweroff:
  * sysfs attributes
  */
 static ssize_t
-et8ek8_priv_mem_read(struct device *dev, struct device_attribute *attr,
-		     char *buf)
+priv_mem_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	struct v4l2_subdev *subdev = i2c_get_clientdata(to_i2c_client(dev));
+	struct v4l2_subdev *subdev = dev_get_drvdata(dev);
 	struct et8ek8_sensor *sensor = to_et8ek8_sensor(subdev);
 
 #if PAGE_SIZE < ET8EK8_PRIV_MEM_SIZE
@@ -1248,7 +1250,7 @@ et8ek8_priv_mem_read(struct device *dev, struct device_attribute *attr,
 
 	return ET8EK8_PRIV_MEM_SIZE;
 }
-static DEVICE_ATTR(priv_mem, 0444, et8ek8_priv_mem_read, NULL);
+static DEVICE_ATTR_RO(priv_mem);
 
 /* --------------------------------------------------------------------------
  * V4L2 subdev core operations
@@ -1327,7 +1329,7 @@ static int et8ek8_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 	struct et8ek8_reglist *reglist;
 
 	reglist = et8ek8_reglist_find_type(&meta_reglist, ET8EK8_REGLIST_MODE);
-	format = __et8ek8_get_pad_format(sensor, fh->pad, 0,
+	format = __et8ek8_get_pad_format(sensor, fh->state, 0,
 					 V4L2_SUBDEV_FORMAT_TRY);
 	et8ek8_reglist_to_mbus(reglist, format);
 
@@ -1374,8 +1376,7 @@ static const struct v4l2_subdev_internal_ops et8ek8_internal_ops = {
  */
 static int __maybe_unused et8ek8_suspend(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct v4l2_subdev *subdev = i2c_get_clientdata(client);
+	struct v4l2_subdev *subdev = dev_get_drvdata(dev);
 	struct et8ek8_sensor *sensor = to_et8ek8_sensor(subdev);
 
 	if (!sensor->power_count)
@@ -1386,8 +1387,7 @@ static int __maybe_unused et8ek8_suspend(struct device *dev)
 
 static int __maybe_unused et8ek8_resume(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct v4l2_subdev *subdev = i2c_get_clientdata(client);
+	struct v4l2_subdev *subdev = dev_get_drvdata(dev);
 	struct et8ek8_sensor *sensor = to_et8ek8_sensor(subdev);
 
 	if (!sensor->power_count)
@@ -1396,8 +1396,7 @@ static int __maybe_unused et8ek8_resume(struct device *dev)
 	return __et8ek8_set_power(sensor, true);
 }
 
-static int et8ek8_probe(struct i2c_client *client,
-			const struct i2c_device_id *devid)
+static int et8ek8_probe(struct i2c_client *client)
 {
 	struct et8ek8_sensor *sensor;
 	struct device *dev = &client->dev;
@@ -1438,6 +1437,7 @@ static int et8ek8_probe(struct i2c_client *client,
 	sensor->subdev.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
 	sensor->subdev.internal_ops = &et8ek8_internal_ops;
 
+	sensor->subdev.entity.function = MEDIA_ENT_F_CAM_SENSOR;
 	sensor->pad.flags = MEDIA_PAD_FL_SOURCE;
 	ret = media_entity_pads_init(&sensor->subdev.entity, 1, &sensor->pad);
 	if (ret < 0) {
@@ -1445,7 +1445,7 @@ static int et8ek8_probe(struct i2c_client *client,
 		goto err_mutex;
 	}
 
-	ret = v4l2_async_register_subdev(&sensor->subdev);
+	ret = v4l2_async_register_subdev_sensor(&sensor->subdev);
 	if (ret < 0)
 		goto err_entity;
 
@@ -1485,6 +1485,7 @@ static const struct of_device_id et8ek8_of_table[] = {
 	{ .compatible = "toshiba,et8ek8" },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, et8ek8_of_table);
 
 static const struct i2c_device_id et8ek8_id_table[] = {
 	{ ET8EK8_NAME, 0 },
@@ -1502,7 +1503,7 @@ static struct i2c_driver et8ek8_i2c_driver = {
 		.pm	= &et8ek8_pm_ops,
 		.of_match_table	= et8ek8_of_table,
 	},
-	.probe		= et8ek8_probe,
+	.probe_new	= et8ek8_probe,
 	.remove		= __exit_p(et8ek8_remove),
 	.id_table	= et8ek8_id_table,
 };

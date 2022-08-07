@@ -26,12 +26,14 @@
  */
 
 #include <linux/module.h>
+#include <linux/pci.h>
 
-#include <drm/drmP.h>
-#include <drm/sis_drm.h>
-#include "sis_drv.h"
-
+#include <drm/drm_drv.h>
+#include <drm/drm_file.h>
 #include <drm/drm_pciids.h>
+#include <drm/sis_drm.h>
+
+#include "sis_drv.h"
 
 static struct pci_device_id pciidlist[] = {
 	sisdrv_PCI_IDS
@@ -39,9 +41,10 @@ static struct pci_device_id pciidlist[] = {
 
 static int sis_driver_load(struct drm_device *dev, unsigned long chipset)
 {
+	struct pci_dev *pdev = to_pci_dev(dev->dev);
 	drm_sis_private_t *dev_priv;
 
-	pci_set_master(dev->pdev);
+	pci_set_master(pdev);
 
 	dev_priv = kzalloc(sizeof(drm_sis_private_t), GFP_KERNEL);
 	if (dev_priv == NULL)
@@ -104,7 +107,6 @@ static struct drm_driver driver = {
 	.open = sis_driver_open,
 	.preclose = sis_reclaim_buffers_locked,
 	.postclose = sis_driver_postclose,
-	.set_busid = drm_pci_set_busid,
 	.dma_quiescent = sis_idle,
 	.lastclose = sis_lastclose,
 	.ioctls = sis_ioctls,
@@ -125,12 +127,12 @@ static struct pci_driver sis_pci_driver = {
 static int __init sis_init(void)
 {
 	driver.num_ioctls = sis_max_ioctl;
-	return drm_pci_init(&driver, &sis_pci_driver);
+	return drm_legacy_pci_init(&driver, &sis_pci_driver);
 }
 
 static void __exit sis_exit(void)
 {
-	drm_pci_exit(&driver, &sis_pci_driver);
+	drm_legacy_pci_exit(&driver, &sis_pci_driver);
 }
 
 module_init(sis_init);

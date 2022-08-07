@@ -24,9 +24,7 @@
 #ifndef __MMSCH_V1_0_H__
 #define __MMSCH_V1_0_H__
 
-#define MMSCH_VERSION_MAJOR	1
-#define MMSCH_VERSION_MINOR	0
-#define MMSCH_VERSION	(MMSCH_VERSION_MAJOR << 16 | MMSCH_VERSION_MINOR)
+#define MMSCH_VERSION	0x1
 
 enum mmsch_v1_0_command_type {
 	MMSCH_COMMAND__DIRECT_REG_WRITE = 0,
@@ -45,6 +43,18 @@ struct mmsch_v1_0_init_header {
 	uint32_t vce_table_size;
 	uint32_t uvd_table_offset;
 	uint32_t uvd_table_size;
+};
+
+struct mmsch_vf_eng_init_header {
+	uint32_t init_status;
+	uint32_t table_offset;
+	uint32_t table_size;
+};
+
+struct mmsch_v1_1_init_header {
+	uint32_t version;
+	uint32_t total_size;
+	struct mmsch_vf_eng_init_header eng[2];
 };
 
 struct mmsch_v1_0_cmd_direct_reg_header {
@@ -83,5 +93,62 @@ struct mmsch_v1_0_cmd_indirect_write {
 	struct mmsch_v1_0_cmd_indirect_reg_header cmd_header;
 	uint32_t reg_value;
 };
+
+static inline void mmsch_v1_0_insert_direct_wt(struct mmsch_v1_0_cmd_direct_write *direct_wt,
+					       uint32_t *init_table,
+					       uint32_t reg_offset,
+					       uint32_t value)
+{
+	direct_wt->cmd_header.reg_offset = reg_offset;
+	direct_wt->reg_value = value;
+	memcpy((void *)init_table, direct_wt, sizeof(struct mmsch_v1_0_cmd_direct_write));
+}
+
+static inline void mmsch_v1_0_insert_direct_rd_mod_wt(struct mmsch_v1_0_cmd_direct_read_modify_write *direct_rd_mod_wt,
+						      uint32_t *init_table,
+						      uint32_t reg_offset,
+						      uint32_t mask, uint32_t data)
+{
+	direct_rd_mod_wt->cmd_header.reg_offset = reg_offset;
+	direct_rd_mod_wt->mask_value = mask;
+	direct_rd_mod_wt->write_data = data;
+	memcpy((void *)init_table, direct_rd_mod_wt,
+	       sizeof(struct mmsch_v1_0_cmd_direct_read_modify_write));
+}
+
+static inline void mmsch_v1_0_insert_direct_poll(struct mmsch_v1_0_cmd_direct_polling *direct_poll,
+						 uint32_t *init_table,
+						 uint32_t reg_offset,
+						 uint32_t mask, uint32_t wait)
+{
+	direct_poll->cmd_header.reg_offset = reg_offset;
+	direct_poll->mask_value = mask;
+	direct_poll->wait_value = wait;
+	memcpy((void *)init_table, direct_poll, sizeof(struct mmsch_v1_0_cmd_direct_polling));
+}
+
+#define MMSCH_V1_0_INSERT_DIRECT_RD_MOD_WT(reg, mask, data) { \
+	mmsch_v1_0_insert_direct_rd_mod_wt(&direct_rd_mod_wt, \
+					   init_table, (reg), \
+					   (mask), (data)); \
+	init_table += sizeof(struct mmsch_v1_0_cmd_direct_read_modify_write)/4; \
+	table_size += sizeof(struct mmsch_v1_0_cmd_direct_read_modify_write)/4; \
+}
+
+#define MMSCH_V1_0_INSERT_DIRECT_WT(reg, value) { \
+	mmsch_v1_0_insert_direct_wt(&direct_wt, \
+				    init_table, (reg), \
+				    (value)); \
+	init_table += sizeof(struct mmsch_v1_0_cmd_direct_write)/4; \
+	table_size += sizeof(struct mmsch_v1_0_cmd_direct_write)/4; \
+}
+
+#define MMSCH_V1_0_INSERT_DIRECT_POLL(reg, mask, wait) { \
+	mmsch_v1_0_insert_direct_poll(&direct_poll, \
+				      init_table, (reg), \
+				      (mask), (wait)); \
+	init_table += sizeof(struct mmsch_v1_0_cmd_direct_polling)/4; \
+	table_size += sizeof(struct mmsch_v1_0_cmd_direct_polling)/4; \
+}
 
 #endif

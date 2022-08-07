@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef TARGET_CORE_PSCSI_H
 #define TARGET_CORE_PSCSI_H
 
@@ -21,14 +22,6 @@
 struct block_device;
 struct scsi_device;
 struct Scsi_Host;
-
-struct pscsi_plugin_task {
-	unsigned char pscsi_sense[TRANSPORT_SENSE_BUFFER];
-	int	pscsi_direction;
-	int	pscsi_result;
-	u32	pscsi_resid;
-	unsigned char pscsi_cdb[0];
-} ____cacheline_aligned;
 
 #define PDF_HAS_CHANNEL_ID	0x01
 #define PDF_HAS_TARGET_ID	0x02

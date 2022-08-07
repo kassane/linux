@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* ldmvsw.c: Sun4v LDOM Virtual Switch Driver.
  *
  * Copyright (C) 2016-2017 Oracle. All rights reserved.
@@ -100,7 +101,7 @@ static struct vnet_port *vsw_tx_port_find(struct sk_buff *skb,
 }
 
 static u16 vsw_select_queue(struct net_device *dev, struct sk_buff *skb,
-			    void *accel_priv, select_queue_fallback_t fallback)
+			    struct net_device *sb_dev)
 {
 	struct vnet_port *port = netdev_priv(dev);
 
@@ -111,7 +112,7 @@ static u16 vsw_select_queue(struct net_device *dev, struct sk_buff *skb,
 }
 
 /* Wrappers to common functions */
-static int vsw_start_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t vsw_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	return sunvnet_start_xmit_common(skb, dev, vsw_tx_port_find);
 }
@@ -229,7 +230,6 @@ static struct net_device *vsw_alloc_netdev(u8 hwaddr[],
 {
 	struct net_device *dev;
 	struct vnet_port *port;
-	int i;
 
 	dev = alloc_etherdev_mqs(sizeof(*port), VNET_MAX_TXQS, 1);
 	if (!dev)
@@ -237,10 +237,8 @@ static struct net_device *vsw_alloc_netdev(u8 hwaddr[],
 	dev->needed_headroom = VNET_PACKET_SKIP + 8;
 	dev->needed_tailroom = 8;
 
-	for (i = 0; i < ETH_ALEN; i++) {
-		dev->dev_addr[i] = hwaddr[i];
-		dev->perm_addr[i] = dev->dev_addr[i];
-	}
+	eth_hw_addr_set(dev, hwaddr);
+	ether_addr_copy(dev->perm_addr, dev->dev_addr);
 
 	sprintf(dev->name, "vif%d.%d", (int)handle, (int)port_id);
 
@@ -307,7 +305,7 @@ static int vsw_port_probe(struct vio_dev *vdev, const struct vio_device_id *id)
 
 	/* Get (or create) the vnet associated with this port */
 	vp = vsw_get_vnet(hp, vdev->mp, &handle);
-	if (unlikely(IS_ERR(vp))) {
+	if (IS_ERR(vp)) {
 		err = PTR_ERR(vp);
 		pr_err("Failed to get vnet for vsw-port\n");
 		mdesc_release(hp);
@@ -337,7 +335,7 @@ static int vsw_port_probe(struct vio_dev *vdev, const struct vio_device_id *id)
 	port->tsolen = 0;
 
 	/* Mark the port as belonging to ldmvsw which directs the
-	 * the common code to use the net_device in the vnet_port
+	 * common code to use the net_device in the vnet_port
 	 * rather than the net_device in the vnet (which is used
 	 * by sunvnet). This bit is used by the VNET_PORT_TO_NET_DEVICE
 	 * macro.
@@ -363,8 +361,7 @@ static int vsw_port_probe(struct vio_dev *vdev, const struct vio_device_id *id)
 	list_add_rcu(&port->list, &vp->port_list);
 	spin_unlock_irqrestore(&vp->lock, flags);
 
-	setup_timer(&port->clean_timer, sunvnet_clean_timer_expire_common,
-		    (unsigned long)port);
+	timer_setup(&port->clean_timer, sunvnet_clean_timer_expire_common, 0);
 
 	err = register_netdev(dev);
 	if (err) {
@@ -404,20 +401,21 @@ err_out_free_dev:
 	return err;
 }
 
-static int vsw_port_remove(struct vio_dev *vdev)
+static void vsw_port_remove(struct vio_dev *vdev)
 {
 	struct vnet_port *port = dev_get_drvdata(&vdev->dev);
 	unsigned long flags;
 
 	if (port) {
 		del_timer_sync(&port->vio.timer);
+		del_timer_sync(&port->clean_timer);
 
 		napi_disable(&port->napi);
+		unregister_netdev(port->dev);
 
 		list_del_rcu(&port->list);
 
 		synchronize_rcu();
-		del_timer_sync(&port->clean_timer);
 		spin_lock_irqsave(&port->vp->lock, flags);
 		sunvnet_port_rm_txq_common(port);
 		spin_unlock_irqrestore(&port->vp->lock, flags);
@@ -427,11 +425,8 @@ static int vsw_port_remove(struct vio_dev *vdev)
 
 		dev_set_drvdata(&vdev->dev, NULL);
 
-		unregister_netdev(port->dev);
 		free_netdev(port->dev);
 	}
-
-	return 0;
 }
 
 static void vsw_cleanup(void)

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* linux/drivers/mmc/host/sdhci-s3c.c
  *
  * Copyright 2008 Openmoko Inc.
@@ -6,10 +7,6 @@
  *      http://armlinux.simtec.co.uk/
  *
  * SDHCI (HSMMC) support for Samsung SoC
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/spinlock.h>
@@ -23,6 +20,7 @@
 #include <linux/gpio.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/of_gpio.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
@@ -110,8 +108,11 @@
  * @ioarea: The resource created when we claimed the IO area.
  * @pdata: The platform data for this controller.
  * @cur_clk: The index of the current bus clock.
+ * @ext_cd_irq: External card detect interrupt.
  * @clk_io: The clock for the internal bus interface.
+ * @clk_rates: Clock frequencies.
  * @clk_bus: The clocks that are available for the SD/MMC bus clock.
+ * @no_divider: No or non-standard internal clock divider.
  */
 struct sdhci_s3c {
 	struct sdhci_host	*host;
@@ -120,7 +121,6 @@ struct sdhci_s3c {
 	struct s3c_sdhci_platdata *pdata;
 	int			cur_clk;
 	int			ext_cd_irq;
-	int			ext_cd_gpio;
 
 	struct clk		*clk_io;
 	struct clk		*clk_bus[MAX_BUS_CLK];
@@ -130,8 +130,9 @@ struct sdhci_s3c {
 };
 
 /**
- * struct sdhci_s3c_driver_data - S3C SDHCI platform specific driver data
+ * struct sdhci_s3c_drv_data - S3C SDHCI platform specific driver data
  * @sdhci_quirks: sdhci host specific quirks.
+ * @no_divider: no or non-standard internal clock divider.
  *
  * Specifies platform specific configuration of sdhci controller.
  * Note: A structure for driver specific platform data is used for future
@@ -414,43 +415,11 @@ static void sdhci_cmu_set_clock(struct sdhci_host *host, unsigned int clock)
 	sdhci_writew(host, clk, SDHCI_CLOCK_CONTROL);
 }
 
-/**
- * sdhci_s3c_set_bus_width - support 8bit buswidth
- * @host: The SDHCI host being queried
- * @width: MMC_BUS_WIDTH_ macro for the bus width being requested
- *
- * We have 8-bit width support but is not a v3 controller.
- * So we add platform_bus_width() and support 8bit width.
- */
-static void sdhci_s3c_set_bus_width(struct sdhci_host *host, int width)
-{
-	u8 ctrl;
-
-	ctrl = sdhci_readb(host, SDHCI_HOST_CONTROL);
-
-	switch (width) {
-	case MMC_BUS_WIDTH_8:
-		ctrl |= SDHCI_CTRL_8BITBUS;
-		ctrl &= ~SDHCI_CTRL_4BITBUS;
-		break;
-	case MMC_BUS_WIDTH_4:
-		ctrl |= SDHCI_CTRL_4BITBUS;
-		ctrl &= ~SDHCI_CTRL_8BITBUS;
-		break;
-	default:
-		ctrl &= ~SDHCI_CTRL_4BITBUS;
-		ctrl &= ~SDHCI_CTRL_8BITBUS;
-		break;
-	}
-
-	sdhci_writeb(host, ctrl, SDHCI_HOST_CONTROL);
-}
-
 static struct sdhci_ops sdhci_s3c_ops = {
 	.get_max_clock		= sdhci_s3c_get_max_clk,
 	.set_clock		= sdhci_s3c_set_clock,
 	.get_min_clock		= sdhci_s3c_get_min_clock,
-	.set_bus_width		= sdhci_s3c_set_bus_width,
+	.set_bus_width		= sdhci_set_bus_width,
 	.reset			= sdhci_reset,
 	.set_uhs_signaling	= sdhci_set_uhs_signaling,
 };
@@ -493,30 +462,24 @@ static int sdhci_s3c_parse_dt(struct device *dev,
 }
 #endif
 
-static const struct of_device_id sdhci_s3c_dt_match[];
-
-static inline struct sdhci_s3c_drv_data *sdhci_s3c_get_driver_data(
+static inline const struct sdhci_s3c_drv_data *sdhci_s3c_get_driver_data(
 			struct platform_device *pdev)
 {
 #ifdef CONFIG_OF
-	if (pdev->dev.of_node) {
-		const struct of_device_id *match;
-		match = of_match_node(sdhci_s3c_dt_match, pdev->dev.of_node);
-		return (struct sdhci_s3c_drv_data *)match->data;
-	}
+	if (pdev->dev.of_node)
+		return of_device_get_match_data(&pdev->dev);
 #endif
-	return (struct sdhci_s3c_drv_data *)
+	return (const struct sdhci_s3c_drv_data *)
 			platform_get_device_id(pdev)->driver_data;
 }
 
 static int sdhci_s3c_probe(struct platform_device *pdev)
 {
 	struct s3c_sdhci_platdata *pdata;
-	struct sdhci_s3c_drv_data *drv_data;
+	const struct sdhci_s3c_drv_data *drv_data;
 	struct device *dev = &pdev->dev;
 	struct sdhci_host *host;
 	struct sdhci_s3c *sc;
-	struct resource *res;
 	int ret, irq, ptr, clks;
 
 	if (!pdev->dev.platform_data && !pdev->dev.of_node) {
@@ -525,10 +488,8 @@ static int sdhci_s3c_probe(struct platform_device *pdev)
 	}
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(dev, "no irq specified\n");
+	if (irq < 0)
 		return irq;
-	}
 
 	host = sdhci_alloc_host(dev, sizeof(struct sdhci_s3c));
 	if (IS_ERR(host)) {
@@ -549,7 +510,6 @@ static int sdhci_s3c_probe(struct platform_device *pdev)
 			goto err_pdata_io_clk;
 	} else {
 		memcpy(pdata, pdev->dev.platform_data, sizeof(*pdata));
-		sc->ext_cd_gpio = -1; /* invalid gpio number */
 	}
 
 	drv_data = sdhci_s3c_get_driver_data(pdev);
@@ -592,8 +552,7 @@ static int sdhci_s3c_probe(struct platform_device *pdev)
 		goto err_no_busclks;
 	}
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	host->ioaddr = devm_ioremap_resource(&pdev->dev, res);
+	host->ioaddr = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(host->ioaddr)) {
 		ret = PTR_ERR(host->ioaddr);
 		goto err_req_regs;
@@ -646,6 +605,7 @@ static int sdhci_s3c_probe(struct platform_device *pdev)
 	switch (pdata->max_width) {
 	case 8:
 		host->mmc->caps |= MMC_CAP_8_BIT_DATA;
+		fallthrough;
 	case 4:
 		host->mmc->caps |= MMC_CAP_4_BIT_DATA;
 		break;
@@ -687,10 +647,8 @@ static int sdhci_s3c_probe(struct platform_device *pdev)
 		goto err_req_regs;
 
 	ret = sdhci_add_host(host);
-	if (ret) {
-		dev_err(dev, "sdhci_add_host() failed\n");
+	if (ret)
 		goto err_req_regs;
-	}
 
 #ifdef CONFIG_PM
 	if (pdata->cd_type != S3C_SDHCI_CD_INTERNAL)
@@ -782,7 +740,7 @@ static int sdhci_s3c_runtime_resume(struct device *dev)
 	clk_prepare_enable(busclk);
 	if (ourhost->cur_clk >= 0)
 		clk_prepare_enable(ourhost->clk_bus[ourhost->cur_clk]);
-	ret = sdhci_runtime_resume_host(host);
+	ret = sdhci_runtime_resume_host(host, 0);
 	return ret;
 }
 #endif
@@ -793,32 +751,24 @@ static const struct dev_pm_ops sdhci_s3c_pmops = {
 			   NULL)
 };
 
-#if defined(CONFIG_CPU_EXYNOS4210) || defined(CONFIG_SOC_EXYNOS4212)
-static struct sdhci_s3c_drv_data exynos4_sdhci_drv_data = {
-	.no_divider = true,
-};
-#define EXYNOS4_SDHCI_DRV_DATA ((kernel_ulong_t)&exynos4_sdhci_drv_data)
-#else
-#define EXYNOS4_SDHCI_DRV_DATA ((kernel_ulong_t)NULL)
-#endif
-
 static const struct platform_device_id sdhci_s3c_driver_ids[] = {
 	{
 		.name		= "s3c-sdhci",
 		.driver_data	= (kernel_ulong_t)NULL,
-	}, {
-		.name		= "exynos4-sdhci",
-		.driver_data	= EXYNOS4_SDHCI_DRV_DATA,
 	},
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, sdhci_s3c_driver_ids);
 
 #ifdef CONFIG_OF
+static const struct sdhci_s3c_drv_data exynos4_sdhci_drv_data = {
+	.no_divider = true,
+};
+
 static const struct of_device_id sdhci_s3c_dt_match[] = {
 	{ .compatible = "samsung,s3c6410-sdhci", },
 	{ .compatible = "samsung,exynos4210-sdhci",
-		.data = (void *)EXYNOS4_SDHCI_DRV_DATA },
+		.data = &exynos4_sdhci_drv_data },
 	{},
 };
 MODULE_DEVICE_TABLE(of, sdhci_s3c_dt_match);
@@ -830,6 +780,7 @@ static struct platform_driver sdhci_s3c_driver = {
 	.id_table	= sdhci_s3c_driver_ids,
 	.driver		= {
 		.name	= "s3c-sdhci",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = of_match_ptr(sdhci_s3c_dt_match),
 		.pm	= &sdhci_s3c_pmops,
 	},
@@ -840,4 +791,3 @@ module_platform_driver(sdhci_s3c_driver);
 MODULE_DESCRIPTION("Samsung SDHCI (HSMMC) glue");
 MODULE_AUTHOR("Ben Dooks, <ben@simtec.co.uk>");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:s3c-sdhci");

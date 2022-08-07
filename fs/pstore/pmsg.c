@@ -1,14 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2014  Google, Inc.
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/cdev.h>
@@ -22,18 +14,18 @@ static DEFINE_MUTEX(pmsg_lock);
 static ssize_t write_pmsg(struct file *file, const char __user *buf,
 			  size_t count, loff_t *ppos)
 {
-	struct pstore_record record = {
-		.type = PSTORE_TYPE_PMSG,
-		.size = count,
-		.psi = psinfo,
-	};
+	struct pstore_record record;
 	int ret;
 
 	if (!count)
 		return 0;
 
+	pstore_record_init(&record, psinfo);
+	record.type = PSTORE_TYPE_PMSG;
+	record.size = count;
+
 	/* check outside lock, page in any data. write_user also checks */
-	if (!access_ok(VERIFY_READ, buf, count))
+	if (!access_ok(buf, count))
 		return -EFAULT;
 
 	mutex_lock(&pmsg_lock);

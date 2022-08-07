@@ -84,7 +84,7 @@ struct xxx_par;
  * if we don't use modedb. If we do use modedb see xxxfb_init how to use it
  * to get a fb_var_screeninfo. Otherwise define a default var as well. 
  */
-static struct fb_fix_screeninfo xxxfb_fix = {
+static const struct fb_fix_screeninfo xxxfb_fix = {
 	.id =		"FB's name", 
 	.type =		FB_TYPE_PACKED_PIXELS,
 	.visual =	FB_VISUAL_PSEUDOCOLOR,
@@ -96,7 +96,7 @@ static struct fb_fix_screeninfo xxxfb_fix = {
 
     /*
      * 	Modern graphical hardware not only supports pipelines but some 
-     *  also support multiple monitors where each display can have its  
+     *  also support multiple monitors where each display can have
      *  its own unique data. In this case each display could be  
      *  represented by a separate framebuffer device thus a separate 
      *  struct fb_info. Now the struct xxx_par represents the graphics
@@ -130,8 +130,6 @@ static struct fb_info info;
      * just one hardware state. These here represent the default state(s). 
      */
 static struct xxx_par __initdata current_par;
-
-int xxxfb_init(void);
 
 /**
  *	xxxfb_open - Optional function. Called when the framebuffer is
@@ -634,7 +632,7 @@ int xxxfb_sync(struct fb_info *info)
      *  Frame buffer operations
      */
 
-static struct fb_ops xxxfb_ops = {
+static const struct fb_ops xxxfb_ops = {
 	.owner		= THIS_MODULE,
 	.fb_open	= xxxfb_open,
 	.fb_read	= xxxfb_read,
@@ -836,11 +834,11 @@ static void xxxfb_remove(struct pci_dev *dev)
  *	@dev: PCI device
  *	@msg: the suspend event code.
  *
- *      See Documentation/power/admin-guide/devices.rst for more information
+ *      See Documentation/driver-api/pm/devices.rst for more information
  */
-static int xxxfb_suspend(struct pci_dev *dev, pm_message_t msg)
+static int xxxfb_suspend(struct device *dev)
 {
-	struct fb_info *info = pci_get_drvdata(dev);
+	struct fb_info *info = dev_get_drvdata(dev);
 	struct xxxfb_par *par = info->par;
 
 	/* suspend here */
@@ -851,11 +849,11 @@ static int xxxfb_suspend(struct pci_dev *dev, pm_message_t msg)
  *	xxxfb_resume - Optional but recommended function. Resume the device.
  *	@dev: PCI device
  *
- *      See Documentation/power/admin-guide/devices.rst for more information
+ *      See Documentation/driver-api/pm/devices.rst for more information
  */
-static int xxxfb_resume(struct pci_dev *dev)
+static int xxxfb_resume(struct device *dev)
 {
-	struct fb_info *info = pci_get_drvdata(dev);
+	struct fb_info *info = dev_get_drvdata(dev);
 	struct xxxfb_par *par = info->par;
 
 	/* resume here */
@@ -866,12 +864,14 @@ static int xxxfb_resume(struct pci_dev *dev)
 #define xxxfb_resume NULL
 #endif /* CONFIG_PM */
 
-static struct pci_device_id xxxfb_id_table[] = {
+static const struct pci_device_id xxxfb_id_table[] = {
 	{ PCI_VENDOR_ID_XXX, PCI_DEVICE_ID_XXX,
 	  PCI_ANY_ID, PCI_ANY_ID, PCI_BASE_CLASS_DISPLAY << 16,
 	  PCI_CLASS_MASK, 0 },
 	{ 0, }
 };
+
+static SIMPLE_DEV_PM_OPS(xxxfb_pm_ops, xxxfb_suspend, xxxfb_resume);
 
 /* For PCI drivers */
 static struct pci_driver xxxfb_driver = {
@@ -879,13 +879,12 @@ static struct pci_driver xxxfb_driver = {
 	.id_table =	xxxfb_id_table,
 	.probe =	xxxfb_probe,
 	.remove =	xxxfb_remove,
-	.suspend =      xxxfb_suspend, /* optional but recommended */
-	.resume =       xxxfb_resume,  /* optional but recommended */
+	.driver.pm =	xxxfb_pm_ops, /* optional but recommended */
 };
 
 MODULE_DEVICE_TABLE(pci, xxxfb_id_table);
 
-int __init xxxfb_init(void)
+static int __init xxxfb_init(void)
 {
 	/*
 	 *  For kernel boot options (in 'video=xxxfb:<options>' format)
@@ -915,7 +914,7 @@ static void __exit xxxfb_exit(void)
  *	@dev: platform device
  *	@msg: the suspend event code.
  *
- *      See Documentation/power/admin-guide/devices.rst for more information
+ *      See Documentation/driver-api/pm/devices.rst for more information
  */
 static int xxxfb_suspend(struct platform_device *dev, pm_message_t msg)
 {
@@ -930,7 +929,7 @@ static int xxxfb_suspend(struct platform_device *dev, pm_message_t msg)
  *	xxxfb_resume - Optional but recommended function. Resume the device.
  *	@dev: platform device
  *
- *      See Documentation/power/admin-guide/devices.rst for more information
+ *      See Documentation/driver-api/pm/devices.rst for more information
  */
 static int xxxfb_resume(struct platform_dev *dev)
 {
@@ -966,7 +965,7 @@ static struct platform_device *xxxfb_device;
  * Only necessary if your driver takes special options,
  * otherwise we fall back on the generic fb_setup().
  */
-int __init xxxfb_setup(char *options)
+static int __init xxxfb_setup(char *options)
 {
     /* Parse user specified options (`video=xxxfb:') */
 }

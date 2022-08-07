@@ -1,16 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  tm6000-dvb.c - dvb-t support for TM5600/TM6000/TM6010 USB video capture devices
  *
  *  Copyright (C) 2007 Michel Ludwig <michel.ludwig@gmail.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation version 2
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
  */
 
 #include <linux/kernel.h>
@@ -24,14 +16,12 @@
 
 #include <media/tuner.h>
 
-#include "tuner-xc2028.h"
+#include "xc2028.h"
 #include "xc5000.h"
 
 MODULE_DESCRIPTION("DVB driver extension module for tm5600/6000/6010 based TV cards");
 MODULE_AUTHOR("Mauro Carvalho Chehab");
 MODULE_LICENSE("GPL");
-
-MODULE_SUPPORTED_DEVICE("{{Trident, tm5600},{{Trident, tm6000},{{Trident, tm6010}");
 
 static int debug;
 
@@ -45,10 +35,10 @@ static inline void print_err_status(struct tm6000_core *dev,
 
 	switch (status) {
 	case -ENOENT:
-		errmsg = "unlinked synchronuously";
+		errmsg = "unlinked synchronously";
 		break;
 	case -ECONNRESET:
-		errmsg = "unlinked asynchronuously";
+		errmsg = "unlinked asynchronously";
 		break;
 	case -ENOSR:
 		errmsg = "Buffer error (overrun)";
@@ -105,6 +95,7 @@ static void tm6000_urb_received(struct urb *urb)
 			printk(KERN_ERR "tm6000:  error %s\n", __func__);
 			kfree(urb->transfer_buffer);
 			usb_free_urb(urb);
+			dev->dvb->bulk_urb = NULL;
 		}
 	}
 }
@@ -123,19 +114,19 @@ static int tm6000_start_stream(struct tm6000_core *dev)
 	}
 
 	dvb->bulk_urb = usb_alloc_urb(0, GFP_KERNEL);
-	if (dvb->bulk_urb == NULL)
+	if (!dvb->bulk_urb)
 		return -ENOMEM;
 
 	pipe = usb_rcvbulkpipe(dev->udev, dev->bulk_in.endp->desc.bEndpointAddress
 							  & USB_ENDPOINT_NUMBER_MASK);
 
-	size = usb_maxpacket(dev->udev, pipe, usb_pipeout(pipe));
+	size = usb_maxpacket(dev->udev, pipe);
 	size = size * 15; /* 512 x 8 or 12 or 15 */
 
 	dvb->bulk_urb->transfer_buffer = kzalloc(size, GFP_KERNEL);
-	if (dvb->bulk_urb->transfer_buffer == NULL) {
+	if (!dvb->bulk_urb->transfer_buffer) {
 		usb_free_urb(dvb->bulk_urb);
-		printk(KERN_ERR "tm6000: couldn't allocate transfer buffer!\n");
+		dvb->bulk_urb = NULL;
 		return -ENOMEM;
 	}
 
@@ -148,9 +139,13 @@ static int tm6000_start_stream(struct tm6000_core *dev)
 	if (ret < 0) {
 		printk(KERN_ERR "tm6000: error %i in %s during pipe reset\n",
 							ret, __func__);
+
+		kfree(dvb->bulk_urb->transfer_buffer);
+		usb_free_urb(dvb->bulk_urb);
+		dvb->bulk_urb = NULL;
 		return ret;
 	} else
-		printk(KERN_ERR "tm6000: pipe resetted\n");
+		printk(KERN_ERR "tm6000: pipe reset\n");
 
 /*	mutex_lock(&tm6000_driver.open_close_mutex); */
 	ret = usb_submit_urb(dvb->bulk_urb, GFP_ATOMIC);
@@ -162,6 +157,7 @@ static int tm6000_start_stream(struct tm6000_core *dev)
 
 		kfree(dvb->bulk_urb->transfer_buffer);
 		usb_free_urb(dvb->bulk_urb);
+		dvb->bulk_urb = NULL;
 		return ret;
 	}
 
@@ -267,6 +263,11 @@ static int register_dvb(struct tm6000_core *dev)
 
 	ret = dvb_register_adapter(&dvb->adapter, "Trident TVMaster 6000 DVB-T",
 					THIS_MODULE, &dev->udev->dev, adapter_nr);
+	if (ret < 0) {
+		pr_err("tm6000: couldn't register the adapter!\n");
+		goto err;
+	}
+
 	dvb->adapter.priv = dev;
 
 	if (dvb->frontend) {
@@ -361,7 +362,7 @@ static void unregister_dvb(struct tm6000_core *dev)
 {
 	struct tm6000_dvb *dvb = dev->dvb;
 
-	if (dvb->bulk_urb != NULL) {
+	if (dvb->bulk_urb) {
 		struct urb *bulk_urb = dvb->bulk_urb;
 
 		kfree(bulk_urb->transfer_buffer);
@@ -400,10 +401,8 @@ static int dvb_init(struct tm6000_core *dev)
 	}
 
 	dvb = kzalloc(sizeof(struct tm6000_dvb), GFP_KERNEL);
-	if (!dvb) {
-		printk(KERN_INFO "Cannot allocate memory\n");
+	if (!dvb)
 		return -ENOMEM;
-	}
 
 	dev->dvb = dvb;
 

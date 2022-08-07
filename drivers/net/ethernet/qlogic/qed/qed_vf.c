@@ -1,33 +1,7 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause)
 /* QLogic qed NIC Driver
  * Copyright (c) 2015-2017  QLogic Corporation
- *
- * This software is available to you under a choice of one of two
- * licenses.  You may choose to be licensed under the terms of the GNU
- * General Public License (GPL) Version 2, available from the file
- * COPYING in the main directory of this source tree, or the
- * OpenIB.org BSD license below:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      - Redistributions of source code must retain the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer.
- *
- *      - Redistributions in binary form must reproduce the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer in the documentation and /or other materials
- *        provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright (c) 2019-2020 Marvell International Ltd.
  */
 
 #include <linux/crc32.h>
@@ -53,7 +27,7 @@ static void *qed_vf_pf_prep(struct qed_hwfn *p_hwfn, u16 type, u16 length)
 		   "preparing to send 0x%04x tlv over vf pf channel\n",
 		   type);
 
-	/* Reset Requst offset */
+	/* Reset Request offset */
 	p_iov->offset = (u8 *)p_iov->vf2pf_request;
 
 	/* Clear mailbox - both request and reply */
@@ -81,12 +55,17 @@ static void qed_vf_pf_req_end(struct qed_hwfn *p_hwfn, int req_status)
 	mutex_unlock(&(p_hwfn->vf_iov_info->mutex));
 }
 
+#define QED_VF_CHANNEL_USLEEP_ITERATIONS	90
+#define QED_VF_CHANNEL_USLEEP_DELAY		100
+#define QED_VF_CHANNEL_MSLEEP_ITERATIONS	10
+#define QED_VF_CHANNEL_MSLEEP_DELAY		25
+
 static int qed_send_msg2pf(struct qed_hwfn *p_hwfn, u8 *done, u32 resp_size)
 {
 	union vfpf_tlvs *p_req = p_hwfn->vf_iov_info->vf2pf_request;
 	struct ustorm_trigger_vf_zone trigger;
 	struct ustorm_vf_zone *zone_data;
-	int rc = 0, time = 100;
+	int iter, rc = 0;
 
 	zone_data = (struct ustorm_vf_zone *)PXP_VF_BAR0_START_USDM_ZONE_B;
 
@@ -126,11 +105,19 @@ static int qed_send_msg2pf(struct qed_hwfn *p_hwfn, u8 *done, u32 resp_size)
 	REG_WR(p_hwfn, (uintptr_t)&zone_data->trigger, *((u32 *)&trigger));
 
 	/* When PF would be done with the response, it would write back to the
-	 * `done' address. Poll until then.
+	 * `done' address from a coherent DMA zone. Poll until then.
 	 */
-	while ((!*done) && time) {
-		msleep(25);
-		time--;
+
+	iter = QED_VF_CHANNEL_USLEEP_ITERATIONS;
+	while (!*done && iter--) {
+		udelay(QED_VF_CHANNEL_USLEEP_DELAY);
+		dma_rmb();
+	}
+
+	iter = QED_VF_CHANNEL_MSLEEP_ITERATIONS;
+	while (!*done && iter--) {
+		msleep(QED_VF_CHANNEL_MSLEEP_DELAY);
+		dma_rmb();
 	}
 
 	if (!*done) {
@@ -153,6 +140,77 @@ static int qed_send_msg2pf(struct qed_hwfn *p_hwfn, u8 *done, u32 resp_size)
 	return rc;
 }
 
+static void qed_vf_pf_add_qid(struct qed_hwfn *p_hwfn,
+			      struct qed_queue_cid *p_cid)
+{
+	struct qed_vf_iov *p_iov = p_hwfn->vf_iov_info;
+	struct vfpf_qid_tlv *p_qid_tlv;
+
+	/* Only add QIDs for the queue if it was negotiated with PF */
+	if (!(p_iov->acquire_resp.pfdev_info.capabilities &
+	      PFVF_ACQUIRE_CAP_QUEUE_QIDS))
+		return;
+
+	p_qid_tlv = qed_add_tlv(p_hwfn, &p_iov->offset,
+				CHANNEL_TLV_QID, sizeof(*p_qid_tlv));
+	p_qid_tlv->qid = p_cid->qid_usage_idx;
+}
+
+static int _qed_vf_pf_release(struct qed_hwfn *p_hwfn, bool b_final)
+{
+	struct qed_vf_iov *p_iov = p_hwfn->vf_iov_info;
+	struct pfvf_def_resp_tlv *resp;
+	struct vfpf_first_tlv *req;
+	u32 size;
+	int rc;
+
+	/* clear mailbox and prep first tlv */
+	req = qed_vf_pf_prep(p_hwfn, CHANNEL_TLV_RELEASE, sizeof(*req));
+
+	/* add list termination tlv */
+	qed_add_tlv(p_hwfn, &p_iov->offset,
+		    CHANNEL_TLV_LIST_END, sizeof(struct channel_list_end_tlv));
+
+	resp = &p_iov->pf2vf_reply->default_resp;
+	rc = qed_send_msg2pf(p_hwfn, &resp->hdr.status, sizeof(*resp));
+
+	if (!rc && resp->hdr.status != PFVF_STATUS_SUCCESS)
+		rc = -EAGAIN;
+
+	qed_vf_pf_req_end(p_hwfn, rc);
+	if (!b_final)
+		return rc;
+
+	p_hwfn->b_int_enabled = 0;
+
+	if (p_iov->vf2pf_request)
+		dma_free_coherent(&p_hwfn->cdev->pdev->dev,
+				  sizeof(union vfpf_tlvs),
+				  p_iov->vf2pf_request,
+				  p_iov->vf2pf_request_phys);
+	if (p_iov->pf2vf_reply)
+		dma_free_coherent(&p_hwfn->cdev->pdev->dev,
+				  sizeof(union pfvf_tlvs),
+				  p_iov->pf2vf_reply, p_iov->pf2vf_reply_phys);
+
+	if (p_iov->bulletin.p_virt) {
+		size = sizeof(struct qed_bulletin_content);
+		dma_free_coherent(&p_hwfn->cdev->pdev->dev,
+				  size,
+				  p_iov->bulletin.p_virt, p_iov->bulletin.phys);
+	}
+
+	kfree(p_hwfn->vf_iov_info);
+	p_hwfn->vf_iov_info = NULL;
+
+	return rc;
+}
+
+int qed_vf_pf_release(struct qed_hwfn *p_hwfn)
+{
+	return _qed_vf_pf_release(p_hwfn, true);
+}
+
 #define VF_ACQUIRE_THRESH 3
 static void qed_vf_pf_acquire_reduce_resc(struct qed_hwfn *p_hwfn,
 					  struct vf_pf_resc_request *p_req,
@@ -160,7 +218,7 @@ static void qed_vf_pf_acquire_reduce_resc(struct qed_hwfn *p_hwfn,
 {
 	DP_VERBOSE(p_hwfn,
 		   QED_MSG_IOV,
-		   "PF unwilling to fullill resource request: rxq [%02x/%02x] txq [%02x/%02x] sbs [%02x/%02x] mac [%02x/%02x] vlan [%02x/%02x] mc [%02x/%02x]. Try PF recommended amount\n",
+		   "PF unwilling to fulfill resource request: rxq [%02x/%02x] txq [%02x/%02x] sbs [%02x/%02x] mac [%02x/%02x] vlan [%02x/%02x] mc [%02x/%02x] cids [%02x/%02x]. Try PF recommended amount\n",
 		   p_req->num_rxqs,
 		   p_resp->num_rxqs,
 		   p_req->num_rxqs,
@@ -171,7 +229,8 @@ static void qed_vf_pf_acquire_reduce_resc(struct qed_hwfn *p_hwfn,
 		   p_resp->num_mac_filters,
 		   p_req->num_vlan_filters,
 		   p_resp->num_vlan_filters,
-		   p_req->num_mc_filters, p_resp->num_mc_filters);
+		   p_req->num_mc_filters,
+		   p_resp->num_mc_filters, p_req->num_cids, p_resp->num_cids);
 
 	/* humble our request */
 	p_req->num_txqs = p_resp->num_txqs;
@@ -180,6 +239,7 @@ static void qed_vf_pf_acquire_reduce_resc(struct qed_hwfn *p_hwfn,
 	p_req->num_mac_filters = p_resp->num_mac_filters;
 	p_req->num_vlan_filters = p_resp->num_vlan_filters;
 	p_req->num_mc_filters = p_resp->num_mc_filters;
+	p_req->num_cids = p_resp->num_cids;
 }
 
 static int qed_vf_pf_acquire(struct qed_hwfn *p_hwfn)
@@ -188,6 +248,7 @@ static int qed_vf_pf_acquire(struct qed_hwfn *p_hwfn)
 	struct pfvf_acquire_resp_tlv *resp = &p_iov->pf2vf_reply->acquire_resp;
 	struct pf_vf_pfdev_info *pfdev_info = &resp->pfdev_info;
 	struct vf_pf_resc_request *p_resc;
+	u8 retry_cnt = VF_ACQUIRE_THRESH;
 	bool resources_acquired = false;
 	struct vfpf_acquire_tlv *req;
 	int rc = 0, attempts = 0;
@@ -204,6 +265,7 @@ static int qed_vf_pf_acquire(struct qed_hwfn *p_hwfn)
 	p_resc->num_sbs = QED_MAX_VF_CHAINS_PER_PF;
 	p_resc->num_mac_filters = QED_ETH_VF_NUM_MAC_FILTERS;
 	p_resc->num_vlan_filters = QED_ETH_VF_NUM_VLAN_FILTERS;
+	p_resc->num_cids = QED_ETH_VF_DEFAULT_NUM_CIDS;
 
 	req->vfdev_info.os_type = VFPF_ACQUIRE_OS_LINUX;
 	req->vfdev_info.fw_major = FW_MAJOR_VERSION;
@@ -215,6 +277,13 @@ static int qed_vf_pf_acquire(struct qed_hwfn *p_hwfn)
 
 	/* Fill capability field with any non-deprecated config we support */
 	req->vfdev_info.capabilities |= VFPF_ACQUIRE_CAP_100G;
+
+	/* If we've mapped the doorbell bar, try using queue qids */
+	if (p_iov->b_doorbell_bar) {
+		req->vfdev_info.capabilities |= VFPF_ACQUIRE_CAP_PHYSICAL_BAR |
+						VFPF_ACQUIRE_CAP_QUEUE_QIDS;
+		p_resc->num_cids = QED_ETH_VF_MAX_NUM_CIDS;
+	}
 
 	/* pf 2 vf bulletin board address */
 	req->bulletin_addr = p_iov->bulletin.phys;
@@ -233,6 +302,15 @@ static int qed_vf_pf_acquire(struct qed_hwfn *p_hwfn)
 
 		/* send acquire request */
 		rc = qed_send_msg2pf(p_hwfn, &resp->hdr.status, sizeof(*resp));
+
+		/* Re-try acquire in case of vf-pf hw channel timeout */
+		if (retry_cnt && rc == -EBUSY) {
+			DP_VERBOSE(p_hwfn, QED_MSG_IOV,
+				   "VF retrying to acquire due to VPC timeout\n");
+			retry_cnt--;
+			continue;
+		}
+
 		if (rc)
 			goto exit;
 
@@ -307,6 +385,13 @@ static int qed_vf_pf_acquire(struct qed_hwfn *p_hwfn)
 	if (req->vfdev_info.capabilities & VFPF_ACQUIRE_CAP_PRE_FP_HSI)
 		p_iov->b_pre_fp_hsi = true;
 
+	/* In case PF doesn't support multi-queue Tx, update the number of
+	 * CIDs to reflect the number of queues [older PFs didn't fill that
+	 * field].
+	 */
+	if (!(resp->pfdev_info.capabilities & PFVF_ACQUIRE_CAP_QUEUE_QIDS))
+		resp->resc.num_cids = resp->resc.num_rxqs + resp->resc.num_txqs;
+
 	/* Update bulletin board size with response from PF */
 	p_iov->bulletin.size = resp->bulletin_size;
 
@@ -325,7 +410,6 @@ static int qed_vf_pf_acquire(struct qed_hwfn *p_hwfn)
 	}
 
 	if (!p_iov->b_pre_fp_hsi &&
-	    ETH_HSI_VER_MINOR &&
 	    (resp->pfdev_info.minor_fp_hsi < ETH_HSI_VER_MINOR)) {
 		DP_INFO(p_hwfn,
 			"PF is using older fastpath HSI; %02x.%02x is configured\n",
@@ -338,20 +422,33 @@ exit:
 	return rc;
 }
 
+u32 qed_vf_hw_bar_size(struct qed_hwfn *p_hwfn, enum BAR_ID bar_id)
+{
+	u32 bar_size;
+
+	/* Regview size is fixed */
+	if (bar_id == BAR_ID_0)
+		return 1 << 17;
+
+	/* Doorbell is received from PF */
+	bar_size = p_hwfn->vf_iov_info->acquire_resp.pfdev_info.bar_size;
+	if (bar_size)
+		return 1 << bar_size;
+	return 0;
+}
+
 int qed_vf_hw_prepare(struct qed_hwfn *p_hwfn)
 {
+	struct qed_hwfn *p_lead = QED_LEADING_HWFN(p_hwfn->cdev);
 	struct qed_vf_iov *p_iov;
 	u32 reg;
+	int rc;
 
-	/* Set number of hwfns - might be overriden once leading hwfn learns
+	/* Set number of hwfns - might be overridden once leading hwfn learns
 	 * actual configuration from PF.
 	 */
 	if (IS_LEAD_HWFN(p_hwfn))
 		p_hwfn->cdev->num_hwfns = 1;
-
-	/* Set the doorbell bar. Assumption: regview is set */
-	p_hwfn->doorbells = (u8 __iomem *)p_hwfn->regview +
-					  PXP_VF_BAR0_START_DQ;
 
 	reg = PXP_VF_BAR0_ME_OPAQUE_ADDRESS;
 	p_hwfn->hw_info.opaque_fid = (u16)REG_RD(p_hwfn, reg);
@@ -363,6 +460,30 @@ int qed_vf_hw_prepare(struct qed_hwfn *p_hwfn)
 	p_iov = kzalloc(sizeof(*p_iov), GFP_KERNEL);
 	if (!p_iov)
 		return -ENOMEM;
+
+	/* Doorbells are tricky; Upper-layer has alreday set the hwfn doorbell
+	 * value, but there are several incompatibily scenarios where that
+	 * would be incorrect and we'd need to override it.
+	 */
+	if (!p_hwfn->doorbells) {
+		p_hwfn->doorbells = (u8 __iomem *)p_hwfn->regview +
+						  PXP_VF_BAR0_START_DQ;
+	} else if (p_hwfn == p_lead) {
+		/* For leading hw-function, value is always correct, but need
+		 * to handle scenario where legacy PF would not support 100g
+		 * mapped bars later.
+		 */
+		p_iov->b_doorbell_bar = true;
+	} else {
+		/* here, value would be correct ONLY if the leading hwfn
+		 * received indication that mapped-bars are supported.
+		 */
+		if (p_lead->vf_iov_info->b_doorbell_bar)
+			p_iov->b_doorbell_bar = true;
+		else
+			p_hwfn->doorbells = (u8 __iomem *)
+			    p_hwfn->regview + PXP_VF_BAR0_START_DQ;
+	}
 
 	/* Allocate vf2pf msg */
 	p_iov->vf2pf_request = dma_alloc_coherent(&p_hwfn->cdev->pdev->dev,
@@ -383,7 +504,7 @@ int qed_vf_hw_prepare(struct qed_hwfn *p_hwfn)
 		   QED_MSG_IOV,
 		   "VF's Request mailbox [%p virt 0x%llx phys], Response mailbox [%p virt 0x%llx phys]\n",
 		   p_iov->vf2pf_request,
-		   (u64) p_iov->vf2pf_request_phys,
+		   (u64)p_iov->vf2pf_request_phys,
 		   p_iov->pf2vf_reply, (u64)p_iov->pf2vf_reply_phys);
 
 	/* Allocate Bulletin board */
@@ -392,6 +513,9 @@ int qed_vf_hw_prepare(struct qed_hwfn *p_hwfn)
 						    p_iov->bulletin.size,
 						    &p_iov->bulletin.phys,
 						    GFP_KERNEL);
+	if (!p_iov->bulletin.p_virt)
+		goto free_pf2vf_reply;
+
 	DP_VERBOSE(p_hwfn, QED_MSG_IOV,
 		   "VF's bulletin Board [%p virt 0x%llx phys 0x%08x bytes]\n",
 		   p_iov->bulletin.p_virt,
@@ -403,8 +527,38 @@ int qed_vf_hw_prepare(struct qed_hwfn *p_hwfn)
 
 	p_hwfn->hw_info.personality = QED_PCI_ETH;
 
-	return qed_vf_pf_acquire(p_hwfn);
+	rc = qed_vf_pf_acquire(p_hwfn);
 
+	/* If VF is 100g using a mapped bar and PF is too old to support that,
+	 * acquisition would succeed - but the VF would have no way knowing
+	 * the size of the doorbell bar configured in HW and thus will not
+	 * know how to split it for 2nd hw-function.
+	 * In this case we re-try without the indication of the mapped
+	 * doorbell.
+	 */
+	if (!rc && p_iov->b_doorbell_bar &&
+	    !qed_vf_hw_bar_size(p_hwfn, BAR_ID_1) &&
+	    (p_hwfn->cdev->num_hwfns > 1)) {
+		rc = _qed_vf_pf_release(p_hwfn, false);
+		if (rc)
+			return rc;
+
+		p_iov->b_doorbell_bar = false;
+		p_hwfn->doorbells = (u8 __iomem *)p_hwfn->regview +
+						  PXP_VF_BAR0_START_DQ;
+		rc = qed_vf_pf_acquire(p_hwfn);
+	}
+
+	DP_VERBOSE(p_hwfn, QED_MSG_IOV,
+		   "Regview [%p], Doorbell [%p], Device-doorbell [%p]\n",
+		   p_hwfn->regview, p_hwfn->doorbells, p_hwfn->cdev->doorbells);
+
+	return rc;
+
+free_pf2vf_reply:
+	dma_free_coherent(&p_hwfn->cdev->pdev->dev,
+			  sizeof(union pfvf_tlvs),
+			  p_iov->pf2vf_reply, p_iov->pf2vf_reply_phys);
 free_vf2pf_request:
 	dma_free_coherent(&p_hwfn->cdev->pdev->dev,
 			  sizeof(union vfpf_tlvs),
@@ -414,6 +568,7 @@ free_p_iov:
 
 	return -ENOMEM;
 }
+
 #define TSTORM_QZONE_START   PXP_VF_BAR0_START_SDM_ZONE_A
 #define MSTORM_QZONE_START(dev)   (TSTORM_QZONE_START +	\
 				   (TSTORM_QZONE_SIZE * NUM_OF_L2_QUEUES(dev)))
@@ -421,7 +576,7 @@ free_p_iov:
 static void
 __qed_vf_prep_tunn_req_tlv(struct vfpf_update_tunn_param_tlv *p_req,
 			   struct qed_tunn_update_type *p_src,
-			   enum qed_tunn_clss mask, u8 *p_cls)
+			   enum qed_tunn_mode mask, u8 *p_cls)
 {
 	if (p_src->b_update_mode) {
 		p_req->tun_mode_update_mask |= BIT(mask);
@@ -436,7 +591,7 @@ __qed_vf_prep_tunn_req_tlv(struct vfpf_update_tunn_param_tlv *p_req,
 static void
 qed_vf_prep_tunn_req_tlv(struct vfpf_update_tunn_param_tlv *p_req,
 			 struct qed_tunn_update_type *p_src,
-			 enum qed_tunn_clss mask,
+			 enum qed_tunn_mode mask,
 			 u8 *p_cls, struct qed_tunn_update_udp_port *p_port,
 			 u8 *p_update_port, u16 *p_udp_port)
 {
@@ -588,8 +743,8 @@ qed_vf_pf_rxq_start(struct qed_hwfn *p_hwfn,
 	req->cqe_pbl_addr = cqe_pbl_addr;
 	req->cqe_pbl_size = cqe_pbl_size;
 	req->rxq_addr = bd_chain_phys_addr;
-	req->hw_sb = p_cid->rel.sb;
-	req->sb_index = p_cid->rel.sb_idx;
+	req->hw_sb = p_cid->sb_igu_id;
+	req->sb_index = p_cid->sb_idx;
 	req->bd_max_bytes = bd_max_bytes;
 	req->stat_id = -1;
 
@@ -609,6 +764,9 @@ qed_vf_pf_rxq_start(struct qed_hwfn *p_hwfn,
 		__internal_ram_wr(p_hwfn, *pp_prod, sizeof(u32),
 				  (u32 *)(&init_prod_val));
 	}
+
+	qed_vf_pf_add_qid(p_hwfn, p_cid);
+
 	/* add list termination tlv */
 	qed_add_tlv(p_hwfn, &p_iov->offset,
 		    CHANNEL_TLV_LIST_END, sizeof(struct channel_list_end_tlv));
@@ -657,6 +815,8 @@ int qed_vf_pf_rxq_stop(struct qed_hwfn *p_hwfn,
 	req->num_rxqs = 1;
 	req->cqe_completion = cqe_completion;
 
+	qed_vf_pf_add_qid(p_hwfn, p_cid);
+
 	/* add list termination tlv */
 	qed_add_tlv(p_hwfn, &p_iov->offset,
 		    CHANNEL_TLV_LIST_END, sizeof(struct channel_list_end_tlv));
@@ -697,8 +857,10 @@ qed_vf_pf_txq_start(struct qed_hwfn *p_hwfn,
 	/* Tx */
 	req->pbl_addr = pbl_addr;
 	req->pbl_size = pbl_size;
-	req->hw_sb = p_cid->rel.sb;
-	req->sb_index = p_cid->rel.sb_idx;
+	req->hw_sb = p_cid->sb_igu_id;
+	req->sb_index = p_cid->sb_idx;
+
+	qed_vf_pf_add_qid(p_hwfn, p_cid);
 
 	/* add list termination tlv */
 	qed_add_tlv(p_hwfn, &p_iov->offset,
@@ -728,8 +890,8 @@ qed_vf_pf_txq_start(struct qed_hwfn *p_hwfn,
 	}
 
 	DP_VERBOSE(p_hwfn, QED_MSG_IOV,
-		   "Txq[0x%02x]: doorbell at %p [offset 0x%08x]\n",
-		   qid, *pp_doorbell, resp->offset);
+		   "Txq[0x%02x.%02x]: doorbell at %p [offset 0x%08x]\n",
+		   qid, p_cid->qid_usage_idx, *pp_doorbell, resp->offset);
 exit:
 	qed_vf_pf_req_end(p_hwfn, rc);
 
@@ -748,6 +910,8 @@ int qed_vf_pf_txq_stop(struct qed_hwfn *p_hwfn, struct qed_queue_cid *p_cid)
 
 	req->tx_qid = p_cid->rel.queue_id;
 	req->num_txqs = 1;
+
+	qed_vf_pf_add_qid(p_hwfn, p_cid);
 
 	/* add list termination tlv */
 	qed_add_tlv(p_hwfn, &p_iov->offset,
@@ -792,9 +956,12 @@ int qed_vf_pf_vport_start(struct qed_hwfn *p_hwfn,
 	req->only_untagged = only_untagged;
 
 	/* status blocks */
-	for (i = 0; i < p_hwfn->vf_iov_info->acquire_resp.resc.num_sbs; i++)
-		if (p_hwfn->sbs_info[i])
-			req->sb_addr[i] = p_hwfn->sbs_info[i]->sb_phys;
+	for (i = 0; i < p_hwfn->vf_iov_info->acquire_resp.resc.num_sbs; i++) {
+		struct qed_sb_info *p_sb = p_hwfn->vf_iov_info->sbs_info[i];
+
+		if (p_sb)
+			req->sb_addr[i] = p_sb->sb_phys;
+	}
 
 	/* add list termination tlv */
 	qed_add_tlv(p_hwfn, &p_iov->offset,
@@ -963,7 +1130,7 @@ int qed_vf_pf_vport_update(struct qed_hwfn *p_hwfn,
 		resp_size += sizeof(struct pfvf_def_resp_tlv);
 
 		memcpy(p_mcast_tlv->bins, p_params->bins,
-		       sizeof(unsigned long) * ETH_MULTICAST_MAC_BINS_IN_REGS);
+		       sizeof(u32) * ETH_MULTICAST_MAC_BINS_IN_REGS);
 	}
 
 	update_rx = p_params->accept_flags.update_rx_mode_config;
@@ -1095,54 +1262,6 @@ exit:
 	return rc;
 }
 
-int qed_vf_pf_release(struct qed_hwfn *p_hwfn)
-{
-	struct qed_vf_iov *p_iov = p_hwfn->vf_iov_info;
-	struct pfvf_def_resp_tlv *resp;
-	struct vfpf_first_tlv *req;
-	u32 size;
-	int rc;
-
-	/* clear mailbox and prep first tlv */
-	req = qed_vf_pf_prep(p_hwfn, CHANNEL_TLV_RELEASE, sizeof(*req));
-
-	/* add list termination tlv */
-	qed_add_tlv(p_hwfn, &p_iov->offset,
-		    CHANNEL_TLV_LIST_END, sizeof(struct channel_list_end_tlv));
-
-	resp = &p_iov->pf2vf_reply->default_resp;
-	rc = qed_send_msg2pf(p_hwfn, &resp->hdr.status, sizeof(*resp));
-
-	if (!rc && resp->hdr.status != PFVF_STATUS_SUCCESS)
-		rc = -EAGAIN;
-
-	qed_vf_pf_req_end(p_hwfn, rc);
-
-	p_hwfn->b_int_enabled = 0;
-
-	if (p_iov->vf2pf_request)
-		dma_free_coherent(&p_hwfn->cdev->pdev->dev,
-				  sizeof(union vfpf_tlvs),
-				  p_iov->vf2pf_request,
-				  p_iov->vf2pf_request_phys);
-	if (p_iov->pf2vf_reply)
-		dma_free_coherent(&p_hwfn->cdev->pdev->dev,
-				  sizeof(union pfvf_tlvs),
-				  p_iov->pf2vf_reply, p_iov->pf2vf_reply_phys);
-
-	if (p_iov->bulletin.p_virt) {
-		size = sizeof(struct qed_bulletin_content);
-		dma_free_coherent(&p_hwfn->cdev->pdev->dev,
-				  size,
-				  p_iov->bulletin.p_virt, p_iov->bulletin.phys);
-	}
-
-	kfree(p_hwfn->vf_iov_info);
-	p_hwfn->vf_iov_info = NULL;
-
-	return rc;
-}
-
 void qed_vf_pf_filter_mcast(struct qed_hwfn *p_hwfn,
 			    struct qed_filter_mcast *p_filter_cmd)
 {
@@ -1157,7 +1276,7 @@ void qed_vf_pf_filter_mcast(struct qed_hwfn *p_hwfn,
 			u32 bit;
 
 			bit = qed_mcast_bin_from_mac(p_filter_cmd->mac[i]);
-			__set_bit(bit, sp_params.bins);
+			sp_params.bins[bit / 32] |= 1 << (bit % 32);
 		}
 	}
 
@@ -1174,8 +1293,8 @@ int qed_vf_pf_filter_ucast(struct qed_hwfn *p_hwfn,
 
 	/* clear mailbox and prep first tlv */
 	req = qed_vf_pf_prep(p_hwfn, CHANNEL_TLV_UCAST_FILTER, sizeof(*req));
-	req->opcode = (u8) p_ucast->opcode;
-	req->type = (u8) p_ucast->type;
+	req->opcode = (u8)p_ucast->opcode;
+	req->type = (u8)p_ucast->type;
 	memcpy(req->mac, p_ucast->mac, ETH_ALEN);
 	req->vlan = p_ucast->vlan;
 
@@ -1228,6 +1347,110 @@ exit:
 	return rc;
 }
 
+int qed_vf_pf_get_coalesce(struct qed_hwfn *p_hwfn,
+			   u16 *p_coal, struct qed_queue_cid *p_cid)
+{
+	struct qed_vf_iov *p_iov = p_hwfn->vf_iov_info;
+	struct pfvf_read_coal_resp_tlv *resp;
+	struct vfpf_read_coal_req_tlv *req;
+	int rc;
+
+	/* clear mailbox and prep header tlv */
+	req = qed_vf_pf_prep(p_hwfn, CHANNEL_TLV_COALESCE_READ, sizeof(*req));
+	req->qid = p_cid->rel.queue_id;
+	req->is_rx = p_cid->b_is_rx ? 1 : 0;
+
+	qed_add_tlv(p_hwfn, &p_iov->offset, CHANNEL_TLV_LIST_END,
+		    sizeof(struct channel_list_end_tlv));
+	resp = &p_iov->pf2vf_reply->read_coal_resp;
+
+	rc = qed_send_msg2pf(p_hwfn, &resp->hdr.status, sizeof(*resp));
+	if (rc)
+		goto exit;
+
+	if (resp->hdr.status != PFVF_STATUS_SUCCESS)
+		goto exit;
+
+	*p_coal = resp->coal;
+exit:
+	qed_vf_pf_req_end(p_hwfn, rc);
+
+	return rc;
+}
+
+int
+qed_vf_pf_bulletin_update_mac(struct qed_hwfn *p_hwfn,
+			      const u8 *p_mac)
+{
+	struct qed_vf_iov *p_iov = p_hwfn->vf_iov_info;
+	struct vfpf_bulletin_update_mac_tlv *p_req;
+	struct pfvf_def_resp_tlv *p_resp;
+	int rc;
+
+	if (!p_mac)
+		return -EINVAL;
+
+	/* clear mailbox and prep header tlv */
+	p_req = qed_vf_pf_prep(p_hwfn, CHANNEL_TLV_BULLETIN_UPDATE_MAC,
+			       sizeof(*p_req));
+	ether_addr_copy(p_req->mac, p_mac);
+	DP_VERBOSE(p_hwfn, QED_MSG_IOV,
+		   "Requesting bulletin update for MAC[%pM]\n", p_mac);
+
+	/* add list termination tlv */
+	qed_add_tlv(p_hwfn, &p_iov->offset, CHANNEL_TLV_LIST_END,
+		    sizeof(struct channel_list_end_tlv));
+
+	p_resp = &p_iov->pf2vf_reply->default_resp;
+	rc = qed_send_msg2pf(p_hwfn, &p_resp->hdr.status, sizeof(*p_resp));
+	qed_vf_pf_req_end(p_hwfn, rc);
+	return rc;
+}
+
+int
+qed_vf_pf_set_coalesce(struct qed_hwfn *p_hwfn,
+		       u16 rx_coal, u16 tx_coal, struct qed_queue_cid *p_cid)
+{
+	struct qed_vf_iov *p_iov = p_hwfn->vf_iov_info;
+	struct vfpf_update_coalesce *req;
+	struct pfvf_def_resp_tlv *resp;
+	int rc;
+
+	/* clear mailbox and prep header tlv */
+	req = qed_vf_pf_prep(p_hwfn, CHANNEL_TLV_COALESCE_UPDATE, sizeof(*req));
+
+	req->rx_coal = rx_coal;
+	req->tx_coal = tx_coal;
+	req->qid = p_cid->rel.queue_id;
+
+	DP_VERBOSE(p_hwfn,
+		   QED_MSG_IOV,
+		   "Setting coalesce rx_coal = %d, tx_coal = %d at queue = %d\n",
+		   rx_coal, tx_coal, req->qid);
+
+	/* add list termination tlv */
+	qed_add_tlv(p_hwfn, &p_iov->offset, CHANNEL_TLV_LIST_END,
+		    sizeof(struct channel_list_end_tlv));
+
+	resp = &p_iov->pf2vf_reply->default_resp;
+	rc = qed_send_msg2pf(p_hwfn, &resp->hdr.status, sizeof(*resp));
+	if (rc)
+		goto exit;
+
+	if (resp->hdr.status != PFVF_STATUS_SUCCESS)
+		goto exit;
+
+	if (rx_coal)
+		p_hwfn->cdev->rx_coalesce_usecs = rx_coal;
+
+	if (tx_coal)
+		p_hwfn->cdev->tx_coalesce_usecs = tx_coal;
+
+exit:
+	qed_vf_pf_req_end(p_hwfn, rc);
+	return rc;
+}
+
 u16 qed_vf_get_igu_sb_id(struct qed_hwfn *p_hwfn, u16 sb_id)
 {
 	struct qed_vf_iov *p_iov = p_hwfn->vf_iov_info;
@@ -1238,6 +1461,24 @@ u16 qed_vf_get_igu_sb_id(struct qed_hwfn *p_hwfn, u16 sb_id)
 	}
 
 	return p_iov->acquire_resp.resc.hw_sbs[sb_id].hw_sb_id;
+}
+
+void qed_vf_set_sb_info(struct qed_hwfn *p_hwfn,
+			u16 sb_id, struct qed_sb_info *p_sb)
+{
+	struct qed_vf_iov *p_iov = p_hwfn->vf_iov_info;
+
+	if (!p_iov) {
+		DP_NOTICE(p_hwfn, "vf_sriov_info isn't initialized\n");
+		return;
+	}
+
+	if (sb_id >= PFVF_MAX_SBS_PER_VF) {
+		DP_NOTICE(p_hwfn, "Can't configure SB %04x\n", sb_id);
+		return;
+	}
+
+	p_iov->sbs_info[sb_id] = p_sb;
 }
 
 int qed_vf_read_bulletin(struct qed_hwfn *p_hwfn, u8 *p_change)
@@ -1342,6 +1583,16 @@ void qed_vf_get_num_rxqs(struct qed_hwfn *p_hwfn, u8 *num_rxqs)
 	*num_rxqs = p_hwfn->vf_iov_info->acquire_resp.resc.num_rxqs;
 }
 
+void qed_vf_get_num_txqs(struct qed_hwfn *p_hwfn, u8 *num_txqs)
+{
+	*num_txqs = p_hwfn->vf_iov_info->acquire_resp.resc.num_txqs;
+}
+
+void qed_vf_get_num_cids(struct qed_hwfn *p_hwfn, u8 *num_cids)
+{
+	*num_cids = p_hwfn->vf_iov_info->acquire_resp.resc.num_cids;
+}
+
 void qed_vf_get_port_mac(struct qed_hwfn *p_hwfn, u8 *port_mac)
 {
 	memcpy(port_mac,
@@ -1442,7 +1693,7 @@ static void qed_handle_bulletin_change(struct qed_hwfn *hwfn)
 	ops->ports_update(cookie, vxlan_port, geneve_port);
 
 	/* Always update link configuration according to bulletin */
-	qed_link_update(hwfn);
+	qed_link_update(hwfn, NULL);
 }
 
 void qed_iov_vf_task(struct work_struct *work)

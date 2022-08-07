@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * extcon-rt8973a.c - Richtek RT8973A extcon driver to support USB switches
  *
  * Copyright (c) 2014 Samsung Electronics Co., Ltd
  * Author: Chanwoo Choi <cw00.choi@samsung.com>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/err.h>
@@ -20,7 +16,7 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
-#include <linux/extcon.h>
+#include <linux/extcon-provider.h>
 
 #include "extcon-rt8973a.h"
 
@@ -196,7 +192,6 @@ static const struct regmap_irq_chip rt8973a_muic_irq_chip = {
 	.name			= "rt8973a",
 	.status_base		= RT8973A_REG_INT1,
 	.mask_base		= RT8973A_REG_INTM1,
-	.mask_invert		= false,
 	.num_regs		= 2,
 	.irqs			= rt8973a_irqs,
 	.num_irqs		= ARRAY_SIZE(rt8973a_irqs),

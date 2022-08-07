@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 #include <linux/etherdevice.h>
 #include <linux/if_macvlan.h>
 #include <linux/if_tap.h>
@@ -49,7 +50,7 @@ static struct class macvtap_class = {
 static struct cdev macvtap_cdev;
 
 #define TUN_OFFLOADS (NETIF_F_HW_CSUM | NETIF_F_TSO_ECN | NETIF_F_TSO | \
-		      NETIF_F_TSO6 | NETIF_F_UFO)
+		      NETIF_F_TSO6)
 
 static void macvtap_count_tx_dropped(struct tap_dev *tap)
 {
@@ -77,10 +78,9 @@ static void macvtap_update_features(struct tap_dev *tap,
 	netdev_update_features(vlan->dev);
 }
 
-static int macvtap_newlink(struct net *src_net,
-			   struct net_device *dev,
-			   struct nlattr *tb[],
-			   struct nlattr *data[])
+static int macvtap_newlink(struct net *src_net, struct net_device *dev,
+			   struct nlattr *tb[], struct nlattr *data[],
+			   struct netlink_ext_ack *extack)
 {
 	struct macvtap_dev *vlantap = netdev_priv(dev);
 	int err;
@@ -106,7 +106,7 @@ static int macvtap_newlink(struct net *src_net,
 	/* Don't put anything that may fail after macvlan_common_newlink
 	 * because we can't undo what it does.
 	 */
-	err = macvlan_common_newlink(src_net, dev, tb, data);
+	err = macvlan_common_newlink(src_net, dev, tb, data, extack);
 	if (err) {
 		netdev_rx_handler_unregister(dev);
 		return err;
@@ -133,11 +133,17 @@ static void macvtap_setup(struct net_device *dev)
 	dev->tx_queue_len = TUN_READQ_SIZE;
 }
 
+static struct net *macvtap_link_net(const struct net_device *dev)
+{
+	return dev_net(macvlan_dev_real_dev(dev));
+}
+
 static struct rtnl_link_ops macvtap_link_ops __read_mostly = {
 	.kind		= "macvtap",
 	.setup		= macvtap_setup,
 	.newlink	= macvtap_newlink,
 	.dellink	= macvtap_dellink,
+	.get_link_net	= macvtap_link_net,
 	.priv_size      = sizeof(struct macvtap_dev),
 };
 
@@ -169,7 +175,7 @@ static int macvtap_device_event(struct notifier_block *unused,
 
 		devt = MKDEV(MAJOR(macvtap_major), vlantap->tap.minor);
 		classdev = device_create(&macvtap_class, &dev->dev, devt,
-					 dev, tap_name);
+					 dev, "%s", tap_name);
 		if (IS_ERR(classdev)) {
 			tap_free_minor(macvtap_major, &vlantap->tap);
 			return notifier_from_errno(PTR_ERR(classdev));
@@ -205,8 +211,8 @@ static int macvtap_init(void)
 {
 	int err;
 
-	err = tap_create_cdev(&macvtap_cdev, &macvtap_major, "macvtap");
-
+	err = tap_create_cdev(&macvtap_cdev, &macvtap_major, "macvtap",
+			      THIS_MODULE);
 	if (err)
 		goto out1;
 

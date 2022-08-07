@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * aes-ccm-glue.c - AES-CCM transform for ARMv8 with Crypto Extensions
  *
- * Copyright (C) 2013 - 2014 Linaro Ltd <ard.biesheuvel@linaro.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
+ * Copyright (C) 2013 - 2017 Linaro Ltd <ard.biesheuvel@linaro.org>
  */
 
 #include <asm/neon.h>
@@ -30,8 +27,8 @@ static int num_rounds(struct crypto_aes_ctx *ctx)
 	return 6 + ctx->key_length / 4;
 }
 
-asmlinkage void ce_aes_ccm_auth_data(u8 mac[], u8 const in[], u32 abytes,
-				     u32 *macp, u32 const rk[], u32 rounds);
+asmlinkage u32 ce_aes_ccm_auth_data(u8 mac[], u8 const in[], u32 abytes,
+				    u32 macp, u32 const rk[], u32 rounds);
 
 asmlinkage void ce_aes_ccm_encrypt(u8 out[], u8 const in[], u32 cbytes,
 				   u32 const rk[], u32 rounds, u8 mac[],
@@ -48,14 +45,8 @@ static int ccm_setkey(struct crypto_aead *tfm, const u8 *in_key,
 		      unsigned int key_len)
 {
 	struct crypto_aes_ctx *ctx = crypto_aead_ctx(tfm);
-	int ret;
 
-	ret = ce_aes_expandkey(ctx, in_key, key_len);
-	if (!ret)
-		return 0;
-
-	tfm->base.crt_flags |= CRYPTO_TFM_RES_BAD_KEY_LEN;
-	return -EINVAL;
+	return ce_aes_expandkey(ctx, in_key, key_len);
 }
 
 static int ccm_setauthsize(struct crypto_aead *tfm, unsigned int authsize)
@@ -122,8 +113,8 @@ static void ccm_calculate_auth_mac(struct aead_request *req, u8 mac[])
 		ltag.len = 6;
 	}
 
-	ce_aes_ccm_auth_data(mac, (u8 *)&ltag, ltag.len, &macp, ctx->key_enc,
-			     num_rounds(ctx));
+	macp = ce_aes_ccm_auth_data(mac, (u8 *)&ltag, ltag.len, macp,
+				    ctx->key_enc, num_rounds(ctx));
 	scatterwalk_start(&walk, req->src);
 
 	do {
@@ -134,9 +125,16 @@ static void ccm_calculate_auth_mac(struct aead_request *req, u8 mac[])
 			scatterwalk_start(&walk, sg_next(walk.sg));
 			n = scatterwalk_clamp(&walk, len);
 		}
+		n = min_t(u32, n, SZ_4K); /* yield NEON at least every 4k */
 		p = scatterwalk_map(&walk);
-		ce_aes_ccm_auth_data(mac, p, n, &macp, ctx->key_enc,
-				     num_rounds(ctx));
+
+		macp = ce_aes_ccm_auth_data(mac, p, n, macp, ctx->key_enc,
+					    num_rounds(ctx));
+
+		if (len / SZ_4K > (len - n) / SZ_4K) {
+			kernel_neon_end();
+			kernel_neon_begin();
+		}
 		len -= n;
 
 		scatterwalk_unmap(p);
@@ -159,17 +157,19 @@ static int ccm_encrypt(struct aead_request *req)
 	if (err)
 		return err;
 
-	kernel_neon_begin_partial(6);
+	/* preserve the original iv for the final round */
+	memcpy(buf, req->iv, AES_BLOCK_SIZE);
+
+	err = skcipher_walk_aead_encrypt(&walk, req, false);
+	if (unlikely(err))
+		return err;
+
+	kernel_neon_begin();
 
 	if (req->assoclen)
 		ccm_calculate_auth_mac(req, mac);
 
-	/* preserve the original iv for the final round */
-	memcpy(buf, req->iv, AES_BLOCK_SIZE);
-
-	err = skcipher_walk_aead_encrypt(&walk, req, true);
-
-	while (walk.nbytes) {
+	do {
 		u32 tail = walk.nbytes % AES_BLOCK_SIZE;
 
 		if (walk.nbytes == walk.total)
@@ -179,15 +179,19 @@ static int ccm_encrypt(struct aead_request *req)
 				   walk.nbytes - tail, ctx->key_enc,
 				   num_rounds(ctx), mac, walk.iv);
 
-		err = skcipher_walk_done(&walk, tail);
-	}
-	if (!err)
-		ce_aes_ccm_final(mac, buf, ctx->key_enc, num_rounds(ctx));
+		if (walk.nbytes == walk.total)
+			ce_aes_ccm_final(mac, buf, ctx->key_enc, num_rounds(ctx));
 
-	kernel_neon_end();
+		kernel_neon_end();
 
-	if (err)
-		return err;
+		if (walk.nbytes) {
+			err = skcipher_walk_done(&walk, tail);
+			if (unlikely(err))
+				return err;
+			if (unlikely(walk.nbytes))
+				kernel_neon_begin();
+		}
+	} while (walk.nbytes);
 
 	/* copy authtag to end of dst */
 	scatterwalk_map_and_copy(mac, req->dst, req->assoclen + req->cryptlen,
@@ -211,17 +215,19 @@ static int ccm_decrypt(struct aead_request *req)
 	if (err)
 		return err;
 
-	kernel_neon_begin_partial(6);
+	/* preserve the original iv for the final round */
+	memcpy(buf, req->iv, AES_BLOCK_SIZE);
+
+	err = skcipher_walk_aead_decrypt(&walk, req, false);
+	if (unlikely(err))
+		return err;
+
+	kernel_neon_begin();
 
 	if (req->assoclen)
 		ccm_calculate_auth_mac(req, mac);
 
-	/* preserve the original iv for the final round */
-	memcpy(buf, req->iv, AES_BLOCK_SIZE);
-
-	err = skcipher_walk_aead_decrypt(&walk, req, true);
-
-	while (walk.nbytes) {
+	do {
 		u32 tail = walk.nbytes % AES_BLOCK_SIZE;
 
 		if (walk.nbytes == walk.total)
@@ -231,15 +237,19 @@ static int ccm_decrypt(struct aead_request *req)
 				   walk.nbytes - tail, ctx->key_enc,
 				   num_rounds(ctx), mac, walk.iv);
 
-		err = skcipher_walk_done(&walk, tail);
-	}
-	if (!err)
-		ce_aes_ccm_final(mac, buf, ctx->key_enc, num_rounds(ctx));
+		if (walk.nbytes == walk.total)
+			ce_aes_ccm_final(mac, buf, ctx->key_enc, num_rounds(ctx));
 
-	kernel_neon_end();
+		kernel_neon_end();
 
-	if (err)
-		return err;
+		if (walk.nbytes) {
+			err = skcipher_walk_done(&walk, tail);
+			if (unlikely(err))
+				return err;
+			if (unlikely(walk.nbytes))
+				kernel_neon_begin();
+		}
+	} while (walk.nbytes);
 
 	/* compare calculated auth tag with the stored one */
 	scatterwalk_map_and_copy(buf, req->src,
@@ -271,7 +281,7 @@ static struct aead_alg ccm_aes_alg = {
 
 static int __init aes_mod_init(void)
 {
-	if (!(elf_hwcap & HWCAP_AES))
+	if (!cpu_have_named_feature(AES))
 		return -ENODEV;
 	return crypto_register_aead(&ccm_aes_alg);
 }

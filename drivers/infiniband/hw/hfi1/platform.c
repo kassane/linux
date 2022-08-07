@@ -1,53 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
 /*
  * Copyright(c) 2015, 2016 Intel Corporation.
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * BSD LICENSE
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  - Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  - Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  - Neither the name of Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
  */
+
+#include <linux/firmware.h>
 
 #include "hfi.h"
 #include "efivar.h"
 #include "eprom.h"
+
+#define DEFAULT_PLATFORM_CONFIG_NAME "hfi1_platform.dat"
 
 static int validate_scratch_checksum(struct hfi1_devdata *dd)
 {
@@ -58,8 +20,13 @@ static int validate_scratch_checksum(struct hfi1_devdata *dd)
 	version = (temp_scratch & BITMAP_VERSION_SMASK) >> BITMAP_VERSION_SHIFT;
 
 	/* Prevent power on default of all zeroes from passing checksum */
-	if (!version)
+	if (!version) {
+		dd_dev_err(dd, "%s: Config bitmap uninitialized\n", __func__);
+		dd_dev_err(dd,
+			   "%s: Please update your BIOS to support active channels\n",
+			   __func__);
 		return 0;
+	}
 
 	/*
 	 * ASIC scratch 0 only contains the checksum and bitmap version as
@@ -84,6 +51,8 @@ static int validate_scratch_checksum(struct hfi1_devdata *dd)
 
 	if (checksum + temp_scratch == 0xFFFF)
 		return 1;
+
+	dd_dev_err(dd, "%s: Configuration bitmap corrupted\n", __func__);
 	return 0;
 }
 
@@ -131,25 +100,22 @@ static void save_platform_config_fields(struct hfi1_devdata *dd)
 
 	ppd->max_power_class = (temp_scratch & QSFP_MAX_POWER_SMASK) >>
 				QSFP_MAX_POWER_SHIFT;
+
+	ppd->config_from_scratch = true;
 }
 
 void get_platform_config(struct hfi1_devdata *dd)
 {
 	int ret = 0;
-	unsigned long size = 0;
 	u8 *temp_platform_config = NULL;
 	u32 esize;
+	const struct firmware *platform_config_file = NULL;
 
 	if (is_integrated(dd)) {
 		if (validate_scratch_checksum(dd)) {
 			save_platform_config_fields(dd);
 			return;
 		}
-		dd_dev_err(dd, "%s: Config bitmap corrupted/uninitialized\n",
-			   __func__);
-		dd_dev_err(dd,
-			   "%s: Please update your BIOS to support active channels\n",
-			   __func__);
 	} else {
 		ret = eprom_read_platform_config(dd,
 						 (void **)&temp_platform_config,
@@ -160,36 +126,38 @@ void get_platform_config(struct hfi1_devdata *dd)
 			dd->platform_config.size = esize;
 			return;
 		}
-		/* fail, try EFI variable */
-
-		ret = read_hfi1_efi_var(dd, "configuration", &size,
-					(void **)&temp_platform_config);
-		if (!ret) {
-			dd->platform_config.data = temp_platform_config;
-			dd->platform_config.size = size;
-			return;
-		}
 	}
 	dd_dev_err(dd,
 		   "%s: Failed to get platform config, falling back to sub-optimal default file\n",
 		   __func__);
-	/* fall back to request firmware */
-	platform_config_load = 1;
+
+	ret = request_firmware(&platform_config_file,
+			       DEFAULT_PLATFORM_CONFIG_NAME,
+			       &dd->pcidev->dev);
+	if (ret) {
+		dd_dev_err(dd,
+			   "%s: No default platform config file found\n",
+			   __func__);
+		return;
+	}
+
+	/*
+	 * Allocate separate memory block to store data and free firmware
+	 * structure. This allows free_platform_config to treat EPROM and
+	 * fallback configs in the same manner.
+	 */
+	dd->platform_config.data = kmemdup(platform_config_file->data,
+					   platform_config_file->size,
+					   GFP_KERNEL);
+	dd->platform_config.size = platform_config_file->size;
+	release_firmware(platform_config_file);
 }
 
 void free_platform_config(struct hfi1_devdata *dd)
 {
-	if (!platform_config_load) {
-		/*
-		 * was loaded from EFI or the EPROM, release memory
-		 * allocated by read_efi_var/eprom_read_platform_config
-		 */
-		kfree(dd->platform_config.data);
-	}
-	/*
-	 * else do nothing, dispose_firmware will release
-	 * struct firmware platform_config on driver exit
-	 */
+	/* Release memory allocated for eprom or fallback file read. */
+	kfree(dd->platform_config.data);
+	dd->platform_config.data = NULL;
 }
 
 void get_port_type(struct hfi1_pportdata *ppd)
@@ -242,7 +210,7 @@ static int qual_power(struct hfi1_pportdata *ppd)
 
 	if (ppd->offline_disabled_reason ==
 			HFI1_ODR_MASK(OPA_LINKDOWN_REASON_POWER_POLICY)) {
-		dd_dev_info(
+		dd_dev_err(
 			ppd->dd,
 			"%s: Port disabled due to system power restrictions\n",
 			__func__);
@@ -268,7 +236,7 @@ static int qual_bitrate(struct hfi1_pportdata *ppd)
 
 	if (ppd->offline_disabled_reason ==
 			HFI1_ODR_MASK(OPA_LINKDOWN_REASON_LINKSPEED_POLICY)) {
-		dd_dev_info(
+		dd_dev_err(
 			ppd->dd,
 			"%s: Cable failed bitrate check, disabling port\n",
 			__func__);
@@ -624,7 +592,7 @@ static void apply_tx_lanes(struct hfi1_pportdata *ppd, u8 field_id,
 			   u32 config_data, const char *message)
 {
 	u8 i;
-	int ret = HCMD_SUCCESS;
+	int ret;
 
 	for (i = 0; i < 4; i++) {
 		ret = load_8051_config(ppd->dd, field_id, i, config_data);
@@ -658,8 +626,8 @@ static u8 aoc_low_power_setting(struct hfi1_pportdata *ppd)
 
 	/* active optical cables only */
 	switch ((cache[QSFP_MOD_TECH_OFFS] & 0xF0) >> 4) {
-	case 0x0 ... 0x9: /* fallthrough */
-	case 0xC: /* fallthrough */
+	case 0x0 ... 0x9: fallthrough;
+	case 0xC: fallthrough;
 	case 0xE:
 		/* active AOC */
 		power_class = get_qsfp_power_class(cache[QSFP_MOD_PWR_OFFS]);
@@ -709,15 +677,15 @@ static void apply_tunings(
 		ret = load_8051_config(ppd->dd, DC_HOST_COMM_SETTINGS,
 				       GENERAL_CONFIG, config_data);
 		if (ret != HCMD_SUCCESS)
-			dd_dev_info(ppd->dd,
-				    "%s: Failed set ext device config params\n",
-				    __func__);
+			dd_dev_err(ppd->dd,
+				   "%s: Failed set ext device config params\n",
+				   __func__);
 	}
 
 	if (tx_preset_index == OPA_INVALID_INDEX) {
 		if (ppd->port_type == PORT_TYPE_QSFP && limiting_active)
-			dd_dev_info(ppd->dd, "%s: Invalid Tx preset index\n",
-				    __func__);
+			dd_dev_err(ppd->dd, "%s: Invalid Tx preset index\n",
+				   __func__);
 		return;
 	}
 
@@ -781,7 +749,9 @@ static int tune_active_qsfp(struct hfi1_pportdata *ppd, u32 *ptr_tx_preset,
 	 * reuse of stale settings established in our previous pass through.
 	 */
 	if (ppd->qsfp_info.reset_needed) {
-		reset_qsfp(ppd);
+		ret = reset_qsfp(ppd);
+		if (ret)
+			return ret;
 		refresh_qsfp_cache(ppd, &ppd->qsfp_info);
 	} else {
 		ppd->qsfp_info.reset_needed = 1;
@@ -887,8 +857,8 @@ static int tune_qsfp(struct hfi1_pportdata *ppd,
 
 		*ptr_tuning_method = OPA_PASSIVE_TUNING;
 		break;
-	case 0x0 ... 0x9: /* fallthrough */
-	case 0xC: /* fallthrough */
+	case 0x0 ... 0x9: fallthrough;
+	case 0xC: fallthrough;
 	case 0xE:
 		ret = tune_active_qsfp(ppd, ptr_tx_preset, ptr_rx_preset,
 				       ptr_total_atten);
@@ -897,10 +867,10 @@ static int tune_qsfp(struct hfi1_pportdata *ppd,
 
 		*ptr_tuning_method = OPA_ACTIVE_TUNING;
 		break;
-	case 0xD: /* fallthrough */
+	case 0xD: fallthrough;
 	case 0xF:
 	default:
-		dd_dev_info(ppd->dd, "%s: Unknown/unsupported cable\n",
+		dd_dev_warn(ppd->dd, "%s: Unknown/unsupported cable\n",
 			    __func__);
 		break;
 	}
@@ -935,6 +905,21 @@ void tune_serdes(struct hfi1_pportdata *ppd)
 	if (loopback != LOOPBACK_NONE ||
 	    ppd->dd->icode == ICODE_FUNCTIONAL_SIMULATOR) {
 		ppd->driver_link_ready = 1;
+
+		if (qsfp_mod_present(ppd)) {
+			ret = acquire_chip_resource(ppd->dd,
+						    qsfp_resource(ppd->dd),
+						    QSFP_WAIT);
+			if (ret) {
+				dd_dev_err(ppd->dd, "%s: hfi%d: cannot lock i2c chain\n",
+					   __func__, (int)ppd->dd->hfi1_id);
+				goto bail;
+			}
+
+			refresh_qsfp_cache(ppd, &ppd->qsfp_info);
+			release_chip_resource(ppd->dd, qsfp_resource(ppd->dd));
+		}
+
 		return;
 	}
 
@@ -942,7 +927,7 @@ void tune_serdes(struct hfi1_pportdata *ppd)
 	case PORT_TYPE_DISCONNECTED:
 		ppd->offline_disabled_reason =
 			HFI1_ODR_MASK(OPA_LINKDOWN_REASON_DISCONNECTED);
-		dd_dev_info(dd, "%s: Port disconnected, disabling port\n",
+		dd_dev_warn(dd, "%s: Port disconnected, disabling port\n",
 			    __func__);
 		goto bail;
 	case PORT_TYPE_FIXED:
@@ -1027,7 +1012,7 @@ void tune_serdes(struct hfi1_pportdata *ppd)
 		}
 		break;
 	default:
-		dd_dev_info(ppd->dd, "%s: Unknown port type\n", __func__);
+		dd_dev_warn(ppd->dd, "%s: Unknown port type\n", __func__);
 		ppd->port_type = PORT_TYPE_UNKNOWN;
 		tuning_method = OPA_UNKNOWN_TUNING;
 		total_atten = 0;

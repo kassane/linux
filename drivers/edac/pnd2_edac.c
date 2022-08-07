@@ -1,16 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for Pondicherry2 memory controller.
  *
  * Copyright (c) 2016, Intel Corporation.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  *
  * [Derived from sb_edac.c]
  *
@@ -36,6 +28,8 @@
 #include <linux/bitmap.h>
 #include <linux/math64.h>
 #include <linux/mod_devicetable.h>
+#include <linux/platform_data/x86/p2sb.h>
+
 #include <asm/cpu_device_id.h>
 #include <asm/intel-family.h>
 #include <asm/processor.h>
@@ -44,6 +38,8 @@
 #include "edac_mc.h"
 #include "edac_module.h"
 #include "pnd2_edac.h"
+
+#define EDAC_MOD_STR		"pnd2_edac"
 
 #define APL_NUM_CHANNELS	4
 #define DNV_NUM_CHANNELS	2
@@ -129,53 +125,84 @@ static struct mem_ctl_info *pnd2_mci;
 #define GET_BITFIELD(v, lo, hi)	(((v) & GENMASK_ULL(hi, lo)) >> (lo))
 #define U64_LSHIFT(val, s)	((u64)(val) << (s))
 
-#ifdef CONFIG_X86_INTEL_SBI_APL
-#include "linux/platform_data/sbi_apl.h"
-int sbi_send(int port, int off, int op, u32 *data)
+/*
+ * On Apollo Lake we access memory controller registers via a
+ * side-band mailbox style interface in a hidden PCI device
+ * configuration space.
+ */
+static struct pci_bus	*p2sb_bus;
+#define P2SB_DEVFN	PCI_DEVFN(0xd, 0)
+#define P2SB_ADDR_OFF	0xd0
+#define P2SB_DATA_OFF	0xd4
+#define P2SB_STAT_OFF	0xd8
+#define P2SB_ROUT_OFF	0xda
+#define P2SB_EADD_OFF	0xdc
+#define P2SB_HIDE_OFF	0xe1
+
+#define P2SB_BUSY	1
+
+#define P2SB_READ(size, off, ptr) \
+	pci_bus_read_config_##size(p2sb_bus, P2SB_DEVFN, off, ptr)
+#define P2SB_WRITE(size, off, val) \
+	pci_bus_write_config_##size(p2sb_bus, P2SB_DEVFN, off, val)
+
+static bool p2sb_is_busy(u16 *status)
 {
-	struct sbi_apl_message sbi_arg;
-	int ret, read = 0;
+	P2SB_READ(word, P2SB_STAT_OFF, status);
 
-	memset(&sbi_arg, 0, sizeof(sbi_arg));
+	return !!(*status & P2SB_BUSY);
+}
 
-	if (op == 0 || op == 4 || op == 6)
-		read = 1;
-	else
-		sbi_arg.data = *data;
+static int _apl_rd_reg(int port, int off, int op, u32 *data)
+{
+	int retries = 0xff, ret;
+	u16 status;
+	u8 hidden;
 
-	sbi_arg.opcode = op;
-	sbi_arg.port_address = port;
-	sbi_arg.register_offset = off;
-	ret = sbi_apl_commit(&sbi_arg);
-	if (ret || sbi_arg.status)
-		edac_dbg(2, "sbi_send status=%d ret=%d data=%x\n",
-				 sbi_arg.status, ret, sbi_arg.data);
+	/* Unhide the P2SB device, if it's hidden */
+	P2SB_READ(byte, P2SB_HIDE_OFF, &hidden);
+	if (hidden)
+		P2SB_WRITE(byte, P2SB_HIDE_OFF, 0);
 
-	if (ret == 0)
-		ret = sbi_arg.status;
+	if (p2sb_is_busy(&status)) {
+		ret = -EAGAIN;
+		goto out;
+	}
 
-	if (ret == 0 && read)
-		*data = sbi_arg.data;
+	P2SB_WRITE(dword, P2SB_ADDR_OFF, (port << 24) | off);
+	P2SB_WRITE(dword, P2SB_DATA_OFF, 0);
+	P2SB_WRITE(dword, P2SB_EADD_OFF, 0);
+	P2SB_WRITE(word, P2SB_ROUT_OFF, 0);
+	P2SB_WRITE(word, P2SB_STAT_OFF, (op << 8) | P2SB_BUSY);
+
+	while (p2sb_is_busy(&status)) {
+		if (retries-- == 0) {
+			ret = -EBUSY;
+			goto out;
+		}
+	}
+
+	P2SB_READ(dword, P2SB_DATA_OFF, data);
+	ret = (status >> 1) & 0x3;
+out:
+	/* Hide the P2SB device, if it was hidden before */
+	if (hidden)
+		P2SB_WRITE(byte, P2SB_HIDE_OFF, hidden);
 
 	return ret;
 }
-#else
-int sbi_send(int port, int off, int op, u32 *data)
-{
-	return -EUNATCH;
-}
-#endif
 
 static int apl_rd_reg(int port, int off, int op, void *data, size_t sz, char *name)
 {
-	int	ret = 0;
+	int ret = 0;
 
 	edac_dbg(2, "Read %s port=%x off=%x op=%x\n", name, port, off, op);
 	switch (sz) {
 	case 8:
-		ret = sbi_send(port, off + 4, op, (u32 *)(data + 4));
+		ret = _apl_rd_reg(port, off + 4, op, (u32 *)(data + 4));
+		fallthrough;
 	case 4:
-		ret = sbi_send(port, off, op, (u32 *)data);
+		ret |= _apl_rd_reg(port, off, op, (u32 *)data);
 		pnd2_printk(KERN_DEBUG, "%s=%x%08x ret=%d\n", name,
 					sz == 8 ? *((u32 *)(data + 4)) : 0, *((u32 *)data), ret);
 		break;
@@ -207,27 +234,14 @@ static u64 get_mem_ctrl_hub_base_addr(void)
 	return U64_LSHIFT(hi.base, 32) | U64_LSHIFT(lo.base, 15);
 }
 
-static u64 get_sideband_reg_base_addr(void)
-{
-	struct pci_dev *pdev;
-	u32 hi, lo;
-
-	pdev = pci_get_device(PCI_VENDOR_ID_INTEL, 0x19dd, NULL);
-	if (pdev) {
-		pci_read_config_dword(pdev, 0x10, &lo);
-		pci_read_config_dword(pdev, 0x14, &hi);
-		pci_dev_put(pdev);
-		return (U64_LSHIFT(hi, 32) | U64_LSHIFT(lo, 0));
-	} else {
-		return 0xfd000000;
-	}
-}
-
+#define DNV_MCHBAR_SIZE  0x8000
+#define DNV_SB_PORT_SIZE 0x10000
 static int dnv_rd_reg(int port, int off, int op, void *data, size_t sz, char *name)
 {
 	struct pci_dev *pdev;
-	char *base;
-	u64 addr;
+	void __iomem *base;
+	struct resource r;
+	int ret;
 
 	if (op == 4) {
 		pdev = pci_get_device(PCI_VENDOR_ID_INTEL, 0x1980, NULL);
@@ -239,24 +253,30 @@ static int dnv_rd_reg(int port, int off, int op, void *data, size_t sz, char *na
 	} else {
 		/* MMIO via memory controller hub base address */
 		if (op == 0 && port == 0x4c) {
-			addr = get_mem_ctrl_hub_base_addr();
-			if (!addr)
+			memset(&r, 0, sizeof(r));
+
+			r.start = get_mem_ctrl_hub_base_addr();
+			if (!r.start)
 				return -ENODEV;
+			r.end = r.start + DNV_MCHBAR_SIZE - 1;
 		} else {
 			/* MMIO via sideband register base address */
-			addr = get_sideband_reg_base_addr();
-			if (!addr)
-				return -ENODEV;
-			addr += (port << 16);
+			ret = p2sb_bar(NULL, 0, &r);
+			if (ret)
+				return ret;
+
+			r.start += (port << 16);
+			r.end = r.start + DNV_SB_PORT_SIZE - 1;
 		}
 
-		base = ioremap((resource_size_t)addr, 0x10000);
+		base = ioremap(r.start, resource_size(&r));
 		if (!base)
 			return -ENODEV;
 
 		if (sz == 8)
-			*(u32 *)(data + 4) = *(u32 *)(base + off + 4);
-		*(u32 *)data = *(u32 *)(base + off);
+			*(u64 *)data = readq(base + off);
+		else
+			*(u32 *)data = readl(base + off);
 
 		iounmap(base);
 	}
@@ -423,16 +443,21 @@ static void dnv_mk_region(char *name, struct region *rp, void *asym)
 
 static int apl_get_registers(void)
 {
+	int ret = -ENODEV;
 	int i;
 
 	if (RD_REG(&asym_2way, b_cr_asym_2way_mem_region_mchbar))
 		return -ENODEV;
 
+	/*
+	 * RD_REGP() will fail for unpopulated or non-existent
+	 * DIMM slots. Return success if we find at least one DIMM.
+	 */
 	for (i = 0; i < APL_NUM_CHANNELS; i++)
-		if (RD_REGP(&drp0[i], d_cr_drp0, apl_dports[i]))
-			return -ENODEV;
+		if (!RD_REGP(&drp0[i], d_cr_drp0, apl_dports[i]))
+			ret = 0;
 
-	return 0;
+	return ret;
 }
 
 static int dnv_get_registers(void)
@@ -1108,7 +1133,7 @@ static void pnd2_mce_output_error(struct mem_ctl_info *mci, const struct mce *m,
 	u32 optypenum = GET_BITFIELD(m->status, 4, 6);
 	int rc;
 
-	tp_event = uc_err ? (ripv ? HW_EVENT_ERR_FATAL : HW_EVENT_ERR_UNCORRECTED) :
+	tp_event = uc_err ? (ripv ? HW_EVENT_ERR_UNCORRECTED : HW_EVENT_ERR_FATAL) :
 						 HW_EVENT_ERR_CORRECTED;
 
 	/*
@@ -1184,7 +1209,7 @@ static void apl_get_dimm_config(struct mem_ctl_info *mci)
 		if (!(chan_mask & BIT(i)))
 			continue;
 
-		dimm = EDAC_DIMM_PTR(mci->layers, mci->dimms, mci->n_layers, i, 0, 0);
+		dimm = edac_get_dimm(mci, i, 0, 0);
 		if (!dimm) {
 			edac_dbg(0, "No allocated DIMM for channel %d\n", i);
 			continue;
@@ -1264,7 +1289,7 @@ static void dnv_get_dimm_config(struct mem_ctl_info *mci)
 			if (!ranks_of_dimm[j])
 				continue;
 
-			dimm = EDAC_DIMM_PTR(mci->layers, mci->dimms, mci->n_layers, i, j, 0);
+			dimm = edac_get_dimm(mci, i, j, 0);
 			if (!dimm) {
 				edac_dbg(0, "No allocated DIMM for channel %d DIMM %d\n", i, j);
 				continue;
@@ -1307,7 +1332,7 @@ static int pnd2_register_mci(struct mem_ctl_info **ppmci)
 	pvt = mci->pvt_info;
 	memset(pvt, 0, sizeof(*pvt));
 
-	mci->mod_name = "pnd2_edac.c";
+	mci->mod_name = EDAC_MOD_STR;
 	mci->dev_name = ops->name;
 	mci->ctl_name = "Pondicherry2";
 
@@ -1349,11 +1374,8 @@ static int pnd2_mce_check_error(struct notifier_block *nb, unsigned long val, vo
 	struct dram_addr daddr;
 	char *type;
 
-	if (edac_get_report_status() == EDAC_REPORTING_DISABLED)
-		return NOTIFY_DONE;
-
 	mci = pnd2_mci;
-	if (!mci)
+	if (!mci || (mce->kflags & MCE_HANDLED_CEC))
 		return NOTIFY_DONE;
 
 	/*
@@ -1382,11 +1404,13 @@ static int pnd2_mce_check_error(struct notifier_block *nb, unsigned long val, vo
 	pnd2_mce_output_error(mci, mce, &daddr);
 
 	/* Advice mcelog that the error were handled */
-	return NOTIFY_STOP;
+	mce->kflags |= MCE_HANDLED_EDAC;
+	return NOTIFY_OK;
 }
 
 static struct notifier_block pnd2_mce_dec = {
 	.notifier_call	= pnd2_mce_check_error,
+	.priority	= MCE_PRIO_EDAC,
 };
 
 #ifdef CONFIG_EDAC_DEBUG
@@ -1490,8 +1514,8 @@ static struct dunit_ops dnv_ops = {
 };
 
 static const struct x86_cpu_id pnd2_cpuids[] = {
-	{ X86_VENDOR_INTEL, 6, INTEL_FAM6_ATOM_GOLDMONT, 0, (kernel_ulong_t)&apl_ops },
-	{ X86_VENDOR_INTEL, 6, INTEL_FAM6_ATOM_DENVERTON, 0, (kernel_ulong_t)&dnv_ops },
+	X86_MATCH_INTEL_FAM6_MODEL(ATOM_GOLDMONT,	&apl_ops),
+	X86_MATCH_INTEL_FAM6_MODEL(ATOM_GOLDMONT_D,	&dnv_ops),
 	{ }
 };
 MODULE_DEVICE_TABLE(x86cpu, pnd2_cpuids);
@@ -1499,15 +1523,29 @@ MODULE_DEVICE_TABLE(x86cpu, pnd2_cpuids);
 static int __init pnd2_init(void)
 {
 	const struct x86_cpu_id *id;
+	const char *owner;
 	int rc;
 
 	edac_dbg(2, "\n");
+
+	owner = edac_get_owner();
+	if (owner && strncmp(owner, EDAC_MOD_STR, sizeof(EDAC_MOD_STR)))
+		return -EBUSY;
+
+	if (cpu_feature_enabled(X86_FEATURE_HYPERVISOR))
+		return -ENODEV;
 
 	id = x86_match_cpu(pnd2_cpuids);
 	if (!id)
 		return -ENODEV;
 
 	ops = (struct dunit_ops *)id->driver_data;
+
+	if (ops->type == APL) {
+		p2sb_bus = pci_find_bus(0, 0);
+		if (!p2sb_bus)
+			return -ENODEV;
+	}
 
 	/* Ensure that the OPSTATE is set correctly for POLL or NMI */
 	opstate_init();

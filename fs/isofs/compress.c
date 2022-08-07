@@ -1,12 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* -*- linux-c -*- ------------------------------------------------------- *
  *   
  *   Copyright 2001 H. Peter Anvin - All Rights Reserved
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation, Inc., 675 Mass Ave, Cambridge MA 02139,
- *   USA; either version 2 of the License, or (at your option) any later
- *   version; incorporated herein by reference.
  *
  * ----------------------------------------------------------------------- */
 
@@ -20,6 +15,7 @@
 #include <linux/init.h>
 #include <linux/bio.h>
 
+#include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/zlib.h>
 
@@ -59,7 +55,7 @@ static loff_t zisofs_uncompress_block(struct inode *inode, loff_t block_start,
 				>> bufshift;
 	int haveblocks;
 	blkcnt_t blocknum;
-	struct buffer_head *bhs[needblocks + 1];
+	struct buffer_head **bhs;
 	int curbh, curpage;
 
 	if (block_size > deflateBound(1UL << zisofs_block_shift)) {
@@ -80,9 +76,13 @@ static loff_t zisofs_uncompress_block(struct inode *inode, loff_t block_start,
 
 	/* Because zlib is not thread-safe, do all the I/O at the top. */
 	blocknum = block_start >> bufshift;
-	memset(bhs, 0, (needblocks + 1) * sizeof(struct buffer_head *));
+	bhs = kcalloc(needblocks + 1, sizeof(*bhs), GFP_KERNEL);
+	if (!bhs) {
+		*errp = -ENOMEM;
+		return 0;
+	}
 	haveblocks = isofs_get_blocks(inode, blocknum, bhs, needblocks);
-	ll_rw_block(REQ_OP_READ, 0, haveblocks, bhs);
+	ll_rw_block(REQ_OP_READ, haveblocks, bhs);
 
 	curbh = 0;
 	curpage = 0;
@@ -190,6 +190,7 @@ z_eio:
 b_eio:
 	for (i = 0; i < haveblocks; i++)
 		brelse(bhs[i]);
+	kfree(bhs);
 	return stream.total_out;
 }
 
@@ -295,8 +296,9 @@ static int zisofs_fill_pages(struct inode *inode, int full_page, int pcount,
  * per reference.  We inject the additional pages into the page
  * cache as a form of readahead.
  */
-static int zisofs_readpage(struct file *file, struct page *page)
+static int zisofs_read_folio(struct file *file, struct folio *folio)
 {
+	struct page *page = &folio->page;
 	struct inode *inode = file_inode(file);
 	struct address_space *mapping = inode->i_mapping;
 	int err;
@@ -305,7 +307,7 @@ static int zisofs_readpage(struct file *file, struct page *page)
 	unsigned int zisofs_pages_per_cblock =
 		PAGE_SHIFT <= zisofs_block_shift ?
 		(1 << (zisofs_block_shift - PAGE_SHIFT)) : 0;
-	struct page *pages[max_t(unsigned, zisofs_pages_per_cblock, 1)];
+	struct page **pages;
 	pgoff_t index = page->index, end_index;
 
 	end_index = (inode->i_size + PAGE_SIZE - 1) >> PAGE_SHIFT;
@@ -329,6 +331,12 @@ static int zisofs_readpage(struct file *file, struct page *page)
 	} else {
 		full_page = 0;
 		pcount = 1;
+	}
+	pages = kcalloc(max_t(unsigned int, zisofs_pages_per_cblock, 1),
+					sizeof(*pages), GFP_KERNEL);
+	if (!pages) {
+		unlock_page(page);
+		return -ENOMEM;
 	}
 	pages[full_page] = page;
 
@@ -357,11 +365,12 @@ static int zisofs_readpage(struct file *file, struct page *page)
 	}			
 
 	/* At this point, err contains 0 or -EIO depending on the "critical" page */
+	kfree(pages);
 	return err;
 }
 
 const struct address_space_operations zisofs_aops = {
-	.readpage = zisofs_readpage,
+	.read_folio = zisofs_read_folio,
 	/* No bmap operation supported */
 };
 

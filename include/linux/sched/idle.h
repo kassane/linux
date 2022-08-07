@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _LINUX_SCHED_IDLE_H
 #define _LINUX_SCHED_IDLE_H
 
@@ -10,7 +11,11 @@ enum cpu_idle_type {
 	CPU_MAX_IDLE_TYPES
 };
 
+#ifdef CONFIG_SMP
 extern void wake_up_if_idle(int cpu);
+#else
+static inline void wake_up_if_idle(int cpu) { }
+#endif
 
 /*
  * Idle thread specific functions to determine the need_resched

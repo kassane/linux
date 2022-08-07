@@ -1,24 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * SRAM protect-exec region helper functions
  *
- * Copyright (C) 2017 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2017 Texas Instruments Incorporated - https://www.ti.com/
  *	Dave Gerlach
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/device.h>
 #include <linux/genalloc.h>
+#include <linux/mm.h>
 #include <linux/sram.h>
 
-#include <asm/cacheflush.h>
+#include <asm/fncpy.h>
+#include <asm/set_memory.h>
 
 #include "sram.h"
 
@@ -57,20 +51,33 @@ int sram_add_protect_exec(struct sram_partition *part)
  * @src: Source address for the data to copy
  * @size: Size of copy to perform, which starting from dst, must reside in pool
  *
+ * Return: Address for copied data that can safely be called through function
+ *	   pointer, or NULL if problem.
+ *
  * This helper function allows sram driver to act as central control location
  * of 'protect-exec' pools which are normal sram pools but are always set
  * read-only and executable except when copying data to them, at which point
  * they are set to read-write non-executable, to make sure no memory is
  * writeable and executable at the same time. This region must be page-aligned
  * and is checked during probe, otherwise page attribute manipulation would
- * not be possible.
+ * not be possible. Care must be taken to only call the returned address as
+ * dst address is not guaranteed to be safely callable.
+ *
+ * NOTE: This function uses the fncpy macro to move code to the executable
+ * region. Some architectures have strict requirements for relocating
+ * executable code, so fncpy is a macro that must be defined by any arch
+ * making use of this functionality that guarantees a safe copy of exec
+ * data and returns a safe address that can be called as a C function
+ * pointer.
  */
-int sram_exec_copy(struct gen_pool *pool, void *dst, void *src,
-		   size_t size)
+void *sram_exec_copy(struct gen_pool *pool, void *dst, void *src,
+		     size_t size)
 {
 	struct sram_partition *part = NULL, *p;
 	unsigned long base;
 	int pages;
+	void *dst_cpy;
+	int ret;
 
 	mutex_lock(&exec_pool_list_mutex);
 	list_for_each_entry(p, &exec_pool_list, list) {
@@ -80,26 +87,38 @@ int sram_exec_copy(struct gen_pool *pool, void *dst, void *src,
 	mutex_unlock(&exec_pool_list_mutex);
 
 	if (!part)
-		return -EINVAL;
+		return NULL;
 
-	if (!addr_in_gen_pool(pool, (unsigned long)dst, size))
-		return -EINVAL;
+	if (!gen_pool_has_addr(pool, (unsigned long)dst, size))
+		return NULL;
 
 	base = (unsigned long)part->base;
 	pages = PAGE_ALIGN(size) / PAGE_SIZE;
 
 	mutex_lock(&part->lock);
 
-	set_memory_nx((unsigned long)base, pages);
-	set_memory_rw((unsigned long)base, pages);
+	ret = set_memory_nx((unsigned long)base, pages);
+	if (ret)
+		goto error_out;
+	ret = set_memory_rw((unsigned long)base, pages);
+	if (ret)
+		goto error_out;
 
-	memcpy(dst, src, size);
+	dst_cpy = fncpy(dst, src, size);
 
-	set_memory_ro((unsigned long)base, pages);
-	set_memory_x((unsigned long)base, pages);
+	ret = set_memory_ro((unsigned long)base, pages);
+	if (ret)
+		goto error_out;
+	ret = set_memory_x((unsigned long)base, pages);
+	if (ret)
+		goto error_out;
 
 	mutex_unlock(&part->lock);
 
-	return 0;
+	return dst_cpy;
+
+error_out:
+	mutex_unlock(&part->lock);
+	return NULL;
 }
 EXPORT_SYMBOL_GPL(sram_exec_copy);

@@ -396,7 +396,7 @@ int orinoco_process_xmit_skb(struct sk_buff *skb,
 		memcpy(hdr.encap, encaps_hdr, sizeof(encaps_hdr));
 
 		/* Make room for the new header, and copy it in */
-		eh = (struct ethhdr *) skb_push(skb, ENCAPS_OVERHEAD);
+		eh = skb_push(skb, ENCAPS_OVERHEAD);
 		memcpy(eh, &hdr, sizeof(hdr));
 	}
 
@@ -647,7 +647,7 @@ static void __orinoco_ev_txexc(struct net_device *dev, struct hermes *hw)
 	netif_wake_queue(dev);
 }
 
-void orinoco_tx_timeout(struct net_device *dev)
+void orinoco_tx_timeout(struct net_device *dev, unsigned int txqueue)
 {
 	struct orinoco_private *priv = ndev_priv(dev);
 	struct net_device_stats *stats = &dev->stats;
@@ -792,7 +792,7 @@ static void orinoco_rx_monitor(struct net_device *dev, u16 rxfid,
 	}
 
 	/* Copy the 802.11 header to the skb */
-	memcpy(skb_put(skb, hdrlen), &(desc->frame_ctl), hdrlen);
+	skb_put_data(skb, &(desc->frame_ctl), hdrlen);
 	skb_reset_mac_header(skb);
 
 	/* If any, copy the data from the card to the skb */
@@ -1029,11 +1029,10 @@ static void orinoco_rx(struct net_device *dev,
 		/* These indicate a SNAP within 802.2 LLC within
 		   802.11 frame which we'll need to de-encapsulate to
 		   the original EthernetII frame. */
-		hdr = (struct ethhdr *)skb_push(skb,
-						ETH_HLEN - ENCAPS_OVERHEAD);
+		hdr = skb_push(skb, ETH_HLEN - ENCAPS_OVERHEAD);
 	} else {
 		/* 802.3 frame - prepend 802.3 header as is */
-		hdr = (struct ethhdr *)skb_push(skb, ETH_HLEN);
+		hdr = skb_push(skb, ETH_HLEN);
 		hdr->h_proto = htons(length);
 	}
 	memcpy(hdr->h_dest, desc->addr1, ETH_ALEN);
@@ -1063,9 +1062,9 @@ static void orinoco_rx(struct net_device *dev,
 	stats->rx_dropped++;
 }
 
-static void orinoco_rx_isr_tasklet(unsigned long data)
+static void orinoco_rx_isr_tasklet(struct tasklet_struct *t)
 {
-	struct orinoco_private *priv = (struct orinoco_private *) data;
+	struct orinoco_private *priv = from_tasklet(priv, t, rx_tasklet);
 	struct net_device *dev = priv->ndev;
 	struct orinoco_rx_data *rx_data, *temp;
 	struct hermes_rx_descriptor *desc;
@@ -1504,7 +1503,7 @@ void __orinoco_ev_info(struct net_device *dev, struct hermes *hw)
 			schedule_work(&priv->join_work);
 			break;
 		}
-		/* fall through */
+		fallthrough;
 	case HERMES_INQ_HOSTSCAN:
 	case HERMES_INQ_HOSTSCAN_SYMBOL: {
 		/* Result of a scanning. Contains information about
@@ -1595,7 +1594,7 @@ void __orinoco_ev_info(struct net_device *dev, struct hermes *hw)
 		/* Ignore this frame for now */
 		if (priv->firmware_type == FIRMWARE_TYPE_AGERE)
 			break;
-		/* fall through */
+		fallthrough;
 	default:
 		printk(KERN_DEBUG "%s: Unknown information frame received: "
 		       "type 0x%04x, length %d\n", dev->name, type, len);
@@ -2199,8 +2198,7 @@ struct orinoco_private
 	INIT_WORK(&priv->wevent_work, orinoco_send_wevents);
 
 	INIT_LIST_HEAD(&priv->rx_list);
-	tasklet_init(&priv->rx_tasklet, orinoco_rx_isr_tasklet,
-		     (unsigned long) priv);
+	tasklet_setup(&priv->rx_tasklet, orinoco_rx_isr_tasklet);
 
 	spin_lock_init(&priv->scan_lock);
 	INIT_LIST_HEAD(&priv->scan_list);
@@ -2267,7 +2265,7 @@ int orinoco_if_add(struct orinoco_private *priv,
 
 	netif_carrier_off(dev);
 
-	memcpy(dev->dev_addr, wiphy->perm_addr, ETH_ALEN);
+	eth_hw_addr_set(dev, wiphy->perm_addr);
 
 	dev->base_addr = base_addr;
 	dev->irq = irq;

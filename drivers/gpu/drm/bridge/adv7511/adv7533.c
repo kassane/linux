@@ -1,14 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2016, The Linux Foundation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/of_graph.h>
@@ -32,20 +24,12 @@ static const struct reg_sequence adv7533_cec_fixed_registers[] = {
 	{ 0x05, 0xc8 },
 };
 
-static const struct regmap_config adv7533_cec_regmap_config = {
-	.reg_bits = 8,
-	.val_bits = 8,
-
-	.max_register = 0xff,
-	.cache_type = REGCACHE_RBTREE,
-};
-
 static void adv7511_dsi_config_timing_gen(struct adv7511 *adv)
 {
 	struct mipi_dsi_device *dsi = adv->dsi;
 	struct drm_display_mode *mode = &adv->curr_mode;
 	unsigned int hsw, hfp, hbp, vsw, vfp, vbp;
-	u8 clock_div_by_lanes[] = { 6, 4, 3 };	/* 2, 3, 4 lanes */
+	static const u8 clock_div_by_lanes[] = { 6, 4, 3 };	/* 2, 3, 4 lanes */
 
 	hsw = mode->hsync_end - mode->hsync_start;
 	hfp = mode->hsync_start - mode->hdisplay;
@@ -116,7 +100,7 @@ void adv7533_dsi_power_off(struct adv7511 *adv)
 	regmap_write(adv->regmap_cec, 0x27, 0x0b);
 }
 
-void adv7533_mode_set(struct adv7511 *adv, struct drm_display_mode *mode)
+void adv7533_mode_set(struct adv7511 *adv, const struct drm_display_mode *mode)
 {
 	struct mipi_dsi_device *dsi = adv->dsi;
 	int lanes, ret;
@@ -145,37 +129,11 @@ int adv7533_patch_registers(struct adv7511 *adv)
 				     ARRAY_SIZE(adv7533_fixed_registers));
 }
 
-void adv7533_uninit_cec(struct adv7511 *adv)
+int adv7533_patch_cec_registers(struct adv7511 *adv)
 {
-	i2c_unregister_device(adv->i2c_cec);
-}
-
-int adv7533_init_cec(struct adv7511 *adv)
-{
-	int ret;
-
-	adv->i2c_cec = i2c_new_dummy(adv->i2c_main->adapter,
-				     adv->i2c_main->addr - 1);
-	if (!adv->i2c_cec)
-		return -ENOMEM;
-
-	adv->regmap_cec = devm_regmap_init_i2c(adv->i2c_cec,
-					&adv7533_cec_regmap_config);
-	if (IS_ERR(adv->regmap_cec)) {
-		ret = PTR_ERR(adv->regmap_cec);
-		goto err;
-	}
-
-	ret = regmap_register_patch(adv->regmap_cec,
+	return regmap_register_patch(adv->regmap_cec,
 				    adv7533_cec_fixed_registers,
 				    ARRAY_SIZE(adv7533_cec_fixed_registers));
-	if (ret)
-		goto err;
-
-	return 0;
-err:
-	adv7533_uninit_cec(adv);
-	return ret;
 }
 
 int adv7533_attach_dsi(struct adv7511 *adv)
@@ -195,11 +153,10 @@ int adv7533_attach_dsi(struct adv7511 *adv)
 		return -EPROBE_DEFER;
 	}
 
-	dsi = mipi_dsi_device_register_full(host, &info);
+	dsi = devm_mipi_dsi_device_register_full(dev, host, &info);
 	if (IS_ERR(dsi)) {
 		dev_err(dev, "failed to create dsi device\n");
-		ret = PTR_ERR(dsi);
-		goto err_dsi_device;
+		return PTR_ERR(dsi);
 	}
 
 	adv->dsi = dsi;
@@ -207,26 +164,15 @@ int adv7533_attach_dsi(struct adv7511 *adv)
 	dsi->lanes = adv->num_dsi_lanes;
 	dsi->format = MIPI_DSI_FMT_RGB888;
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_SYNC_PULSE |
-			  MIPI_DSI_MODE_EOT_PACKET | MIPI_DSI_MODE_VIDEO_HSE;
+			  MIPI_DSI_MODE_NO_EOT_PACKET | MIPI_DSI_MODE_VIDEO_HSE;
 
-	ret = mipi_dsi_attach(dsi);
+	ret = devm_mipi_dsi_attach(dev, dsi);
 	if (ret < 0) {
 		dev_err(dev, "failed to attach dsi to host\n");
-		goto err_dsi_attach;
+		return ret;
 	}
 
 	return 0;
-
-err_dsi_attach:
-	mipi_dsi_device_unregister(dsi);
-err_dsi_device:
-	return ret;
-}
-
-void adv7533_detach_dsi(struct adv7511 *adv)
-{
-	mipi_dsi_detach(adv->dsi);
-	mipi_dsi_device_unregister(adv->dsi);
 }
 
 int adv7533_parse_dt(struct device_node *np, struct adv7511 *adv)

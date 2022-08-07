@@ -1,4 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/compiler.h>
+#include <linux/string.h>
 #include <linux/types.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -114,6 +116,7 @@ static int get_value(struct parse_opt_ctx_t *p,
 		case OPTION_INTEGER:
 		case OPTION_UINTEGER:
 		case OPTION_LONG:
+		case OPTION_ULONG:
 		case OPTION_U64:
 		default:
 			break;
@@ -164,6 +167,7 @@ static int get_value(struct parse_opt_ctx_t *p,
 		case OPTION_INTEGER:
 		case OPTION_UINTEGER:
 		case OPTION_LONG:
+		case OPTION_ULONG:
 		case OPTION_U64:
 		default:
 			break;
@@ -233,6 +237,9 @@ static int get_value(struct parse_opt_ctx_t *p,
 		return err;
 
 	case OPTION_CALLBACK:
+		if (opt->set)
+			*(bool *)opt->set = true;
+
 		if (unset)
 			return (*opt->callback)(opt, NULL, 1) ? (-1) : 0;
 		if (opt->flags & PARSE_OPT_NOARG)
@@ -289,6 +296,22 @@ static int get_value(struct parse_opt_ctx_t *p,
 		if (get_arg(p, opt, flags, &arg))
 			return -1;
 		*(long *)opt->value = strtol(arg, (char **)&s, 10);
+		if (*s)
+			return opterror(opt, "expects a numerical value", flags);
+		return 0;
+
+	case OPTION_ULONG:
+		if (unset) {
+			*(unsigned long *)opt->value = 0;
+			return 0;
+		}
+		if (opt->flags & PARSE_OPT_OPTARG && !p->opt) {
+			*(unsigned long *)opt->value = opt->defval;
+			return 0;
+		}
+		if (get_arg(p, opt, flags, &arg))
+			return -1;
+		*(unsigned long *)opt->value = strtoul(arg, (char **)&s, 10);
 		if (*s)
 			return opterror(opt, "expects a numerical value", flags);
 		return 0;
@@ -367,7 +390,7 @@ retry:
 			return 0;
 		}
 		if (!rest) {
-			if (!prefixcmp(options->long_name, "no-")) {
+			if (strstarts(options->long_name, "no-")) {
 				/*
 				 * The long name itself starts with "no-", so
 				 * accept the option without "no-" so that users
@@ -380,7 +403,7 @@ retry:
 					goto match;
 				}
 				/* Abbreviated case */
-				if (!prefixcmp(options->long_name + 3, arg)) {
+				if (strstarts(options->long_name + 3, arg)) {
 					flags |= OPT_UNSET;
 					goto is_abbreviated;
 				}
@@ -405,7 +428,7 @@ is_abbreviated:
 				continue;
 			}
 			/* negated and abbreviated very much? */
-			if (!prefixcmp("no-", arg)) {
+			if (strstarts("no-", arg)) {
 				flags |= OPT_UNSET;
 				goto is_abbreviated;
 			}
@@ -415,7 +438,7 @@ is_abbreviated:
 			flags |= OPT_UNSET;
 			rest = skip_prefix(arg + 3, options->long_name);
 			/* abbreviated and negated? */
-			if (!rest && !prefixcmp(options->long_name, arg + 3))
+			if (!rest && strstarts(options->long_name, arg + 3))
 				goto is_abbreviated;
 			if (!rest)
 				continue;
@@ -431,7 +454,7 @@ match:
 
 	if (ambiguous_option) {
 		 fprintf(stderr,
-			 " Error: Ambiguous option: %s (could be --%s%s or --%s%s)",
+			 " Error: Ambiguous option: %s (could be --%s%s or --%s%s)\n",
 			 arg,
 			 (ambiguous_flags & OPT_UNSET) ?  "no-" : "",
 			 ambiguous_option->long_name,
@@ -455,16 +478,16 @@ static void check_typos(const char *arg, const struct option *options)
 	if (strlen(arg) < 3)
 		return;
 
-	if (!prefixcmp(arg, "no-")) {
-		fprintf(stderr, " Error: did you mean `--%s` (with two dashes ?)", arg);
+	if (strstarts(arg, "no-")) {
+		fprintf(stderr, " Error: did you mean `--%s` (with two dashes ?)\n", arg);
 		exit(129);
 	}
 
 	for (; options->type != OPTION_END; options++) {
 		if (!options->long_name)
 			continue;
-		if (!prefixcmp(options->long_name, arg)) {
-			fprintf(stderr, " Error: did you mean `--%s` (with two dashes ?)", arg);
+		if (strstarts(options->long_name, arg)) {
+			fprintf(stderr, " Error: did you mean `--%s` (with two dashes ?)\n", arg);
 			exit(129);
 		}
 	}
@@ -701,6 +724,7 @@ static void print_option_help(const struct option *opts, int full)
 	case OPTION_ARGUMENT:
 		break;
 	case OPTION_LONG:
+	case OPTION_ULONG:
 	case OPTION_U64:
 	case OPTION_INTEGER:
 	case OPTION_UINTEGER:
@@ -782,9 +806,9 @@ static int option__cmp(const void *va, const void *vb)
 
 static struct option *options__order(const struct option *opts)
 {
-	int nr_opts = 0, len;
+	int nr_opts = 0, nr_group = 0, len;
 	const struct option *o = opts;
-	struct option *ordered;
+	struct option *opt, *ordered, *group;
 
 	for (o = opts; o->type != OPTION_END; o++)
 		++nr_opts;
@@ -795,7 +819,18 @@ static struct option *options__order(const struct option *opts)
 		goto out;
 	memcpy(ordered, opts, len);
 
-	qsort(ordered, nr_opts, sizeof(*o), option__cmp);
+	/* sort each option group individually */
+	for (opt = group = ordered; opt->type != OPTION_END; opt++) {
+		if (opt->type == OPTION_GROUP) {
+			qsort(group, nr_group, sizeof(*opt), option__cmp);
+			group = opt + 1;
+			nr_group = 0;
+			continue;
+		}
+		nr_group++;
+	}
+	qsort(group, nr_group, sizeof(*opt), option__cmp);
+
 out:
 	return ordered;
 }
@@ -932,10 +967,10 @@ opt:
 		if (opts->long_name == NULL)
 			continue;
 
-		if (!prefixcmp(opts->long_name, optstr))
+		if (strstarts(opts->long_name, optstr))
 			print_option_help(opts, 0);
-		if (!prefixcmp("no-", optstr) &&
-		    !prefixcmp(opts->long_name, optstr + 3))
+		if (strstarts("no-", optstr) &&
+		    strstarts(opts->long_name, optstr + 3))
 			print_option_help(opts, 0);
 	}
 
