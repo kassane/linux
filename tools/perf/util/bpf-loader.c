@@ -27,10 +27,32 @@
 #include "util.h"
 #include "llvm-utils.h"
 #include "c++/clang-c.h"
-#include "hashmap.h"
+#ifdef HAVE_LIBBPF_SUPPORT
+#include <bpf/hashmap.h>
+#else
+#include "util/hashmap.h"
+#endif
 #include "asm/bug.h"
 
 #include <internal/xyarray.h>
+
+#ifndef HAVE_LIBBPF_BPF_PROGRAM__SET_INSNS
+int bpf_program__set_insns(struct bpf_program *prog __maybe_unused,
+			   struct bpf_insn *new_insns __maybe_unused, size_t new_insn_cnt __maybe_unused)
+{
+	pr_err("%s: not support, update libbpf\n", __func__);
+	return -ENOTSUP;
+}
+
+int libbpf_register_prog_handler(const char *sec __maybe_unused,
+                                 enum bpf_prog_type prog_type __maybe_unused,
+                                 enum bpf_attach_type exp_attach_type __maybe_unused,
+                                 const struct libbpf_prog_handler_opts *opts __maybe_unused)
+{
+	pr_err("%s: not support, update libbpf\n", __func__);
+	return -ENOTSUP;
+}
+#endif
 
 /* temporarily disable libbpf deprecation warnings */
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -1879,7 +1901,7 @@ struct evsel *bpf__setup_output_event(struct evlist *evlist, const char *name)
 		if (asprintf(&event_definition, "bpf-output/no-inherit=1,name=%s/", name) < 0)
 			return ERR_PTR(-ENOMEM);
 
-		err = parse_events(evlist, event_definition, NULL);
+		err = parse_event(evlist, event_definition);
 		free(event_definition);
 
 		if (err) {

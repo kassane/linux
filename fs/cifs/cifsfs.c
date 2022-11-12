@@ -46,6 +46,7 @@
 #include "netlink.h"
 #endif
 #include "fs_context.h"
+#include "cached_dir.h"
 
 /*
  * DOS dates from 1980/1/1 through 2107/12/31
@@ -283,30 +284,13 @@ out_no_root:
 static void cifs_kill_sb(struct super_block *sb)
 {
 	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
-	struct cifs_tcon *tcon;
-	struct cached_fid *cfid;
-	struct rb_root *root = &cifs_sb->tlink_tree;
-	struct rb_node *node;
-	struct tcon_link *tlink;
 
 	/*
 	 * We ned to release all dentries for the cached directories
 	 * before we kill the sb.
 	 */
 	if (cifs_sb->root) {
-		for (node = rb_first(root); node; node = rb_next(node)) {
-			tlink = rb_entry(node, struct tcon_link, tl_rbnode);
-			tcon = tlink_tcon(tlink);
-			if (IS_ERR(tcon))
-				continue;
-			cfid = &tcon->crfid;
-			mutex_lock(&cfid->fid_mutex);
-			if (cfid->dentry) {
-				dput(cfid->dentry);
-				cfid->dentry = NULL;
-			}
-			mutex_unlock(&cfid->fid_mutex);
-		}
+		close_all_cached_dirs(cifs_sb);
 
 		/* finally release root dentry */
 		dput(cifs_sb->root);
@@ -412,6 +396,7 @@ cifs_alloc_inode(struct super_block *sb)
 	cifs_inode->epoch = 0;
 	spin_lock_init(&cifs_inode->open_file_lock);
 	generate_random_uuid(cifs_inode->lease_key);
+	cifs_inode->symlink_target = NULL;
 
 	/*
 	 * Can not set i_flags here - they get immediately overwritten to zero
@@ -428,7 +413,11 @@ cifs_alloc_inode(struct super_block *sb)
 static void
 cifs_free_inode(struct inode *inode)
 {
-	kmem_cache_free(cifs_inode_cachep, CIFS_I(inode));
+	struct cifsInodeInfo *cinode = CIFS_I(inode);
+
+	if (S_ISLNK(inode->i_mode))
+		kfree(cinode->symlink_target);
+	kmem_cache_free(cifs_inode_cachep, cinode);
 }
 
 static void
@@ -709,6 +698,7 @@ cifs_show_options(struct seq_file *s, struct dentry *root)
 		seq_printf(s, ",acdirmax=%lu", cifs_sb->ctx->acdirmax / HZ);
 		seq_printf(s, ",acregmax=%lu", cifs_sb->ctx->acregmax / HZ);
 	}
+	seq_printf(s, ",closetimeo=%lu", cifs_sb->ctx->closetimeo / HZ);
 
 	if (tcon->ses->chan_max > 1)
 		seq_printf(s, ",multichannel,max_channels=%zu",
@@ -1154,7 +1144,7 @@ const struct inode_operations cifs_file_inode_ops = {
 };
 
 const struct inode_operations cifs_symlink_inode_ops = {
-	.get_link = cifs_get_link,
+	.get_link = simple_get_link,
 	.permission = cifs_permission,
 	.listxattr = cifs_listxattr,
 };
@@ -1263,6 +1253,12 @@ ssize_t cifs_file_copychunk_range(unsigned int xid,
 	lock_two_nondirectories(target_inode, src_inode);
 
 	cifs_dbg(FYI, "about to flush pages\n");
+
+	rc = filemap_write_and_wait_range(src_inode->i_mapping, off,
+					  off + len - 1);
+	if (rc)
+		goto out;
+
 	/* should we flush first and last page first */
 	truncate_inode_pages(&target_inode->i_data, 0);
 
@@ -1306,8 +1302,11 @@ static ssize_t cifs_copy_file_range(struct file *src_file, loff_t off,
 	ssize_t rc;
 	struct cifsFileInfo *cfile = dst_file->private_data;
 
-	if (cfile->swapfile)
-		return -EOPNOTSUPP;
+	if (cfile->swapfile) {
+		rc = -EOPNOTSUPP;
+		free_xid(xid);
+		return rc;
+	}
 
 	rc = cifs_file_copychunk_range(xid, src_file, off, dst_file, destoff,
 					len, flags);

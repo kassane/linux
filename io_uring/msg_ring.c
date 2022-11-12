@@ -26,7 +26,7 @@ struct io_msg {
 static int io_msg_ring_data(struct io_kiocb *req)
 {
 	struct io_ring_ctx *target_ctx = req->file->private_data;
-	struct io_msg *msg = io_kiocb_to_cmd(req);
+	struct io_msg *msg = io_kiocb_to_cmd(req, struct io_msg);
 
 	if (msg->src_fd || msg->dst_fd || msg->flags)
 		return -EINVAL;
@@ -76,7 +76,7 @@ static int io_double_lock_ctx(struct io_ring_ctx *ctx,
 static int io_msg_send_fd(struct io_kiocb *req, unsigned int issue_flags)
 {
 	struct io_ring_ctx *target_ctx = req->file->private_data;
-	struct io_msg *msg = io_kiocb_to_cmd(req);
+	struct io_msg *msg = io_kiocb_to_cmd(req, struct io_msg);
 	struct io_ring_ctx *ctx = req->ctx;
 	unsigned long file_ptr;
 	struct file *src_file;
@@ -95,6 +95,9 @@ static int io_msg_send_fd(struct io_kiocb *req, unsigned int issue_flags)
 
 	msg->src_fd = array_index_nospec(msg->src_fd, ctx->nr_user_files);
 	file_ptr = io_fixed_file_slot(&ctx->file_table, msg->src_fd)->file_ptr;
+	if (!file_ptr)
+		goto out_unlock;
+
 	src_file = (struct file *) (file_ptr & FFS_MASK);
 	get_file(src_file);
 
@@ -122,7 +125,7 @@ out_unlock:
 
 int io_msg_ring_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 {
-	struct io_msg *msg = io_kiocb_to_cmd(req);
+	struct io_msg *msg = io_kiocb_to_cmd(req, struct io_msg);
 
 	if (unlikely(sqe->buf_index || sqe->personality))
 		return -EINVAL;
@@ -141,7 +144,7 @@ int io_msg_ring_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 
 int io_msg_ring(struct io_kiocb *req, unsigned int issue_flags)
 {
-	struct io_msg *msg = io_kiocb_to_cmd(req);
+	struct io_msg *msg = io_kiocb_to_cmd(req, struct io_msg);
 	int ret;
 
 	ret = -EBADFD;
@@ -165,7 +168,8 @@ done:
 		req_set_fail(req);
 	io_req_set_res(req, ret, 0);
 	/* put file to avoid an attempt to IOPOLL the req */
-	io_put_file(req->file);
+	if (!(req->flags & REQ_F_FIXED_FILE))
+		io_put_file(req->file);
 	req->file = NULL;
 	return IOU_OK;
 }

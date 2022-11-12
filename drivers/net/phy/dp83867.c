@@ -535,7 +535,7 @@ static int dp83867_of_init_io_impedance(struct phy_device *phydev)
 	cell = of_nvmem_cell_get(of_node, "io_impedance_ctrl");
 	if (IS_ERR(cell)) {
 		ret = PTR_ERR(cell);
-		if (ret != -ENOENT)
+		if (ret != -ENOENT && ret != -EOPNOTSUPP)
 			return phydev_err_probe(phydev, ret,
 						"failed to get nvmem cell io_impedance_ctrl\n");
 
@@ -853,6 +853,14 @@ static int dp83867_config_init(struct phy_device *phydev)
 		else
 			val &= ~DP83867_SGMII_TYPE;
 		phy_write_mmd(phydev, DP83867_DEVADDR, DP83867_SGMIICTL, val);
+
+		/* This is a SW workaround for link instability if RX_CTRL is
+		 * not strapped to mode 3 or 4 in HW. This is required for SGMII
+		 * in addition to clearing bit 7, handled above.
+		 */
+		if (dp83867->rxctrl_strap_quirk)
+			phy_set_bits_mmd(phydev, DP83867_DEVADDR, DP83867_CFG4,
+					 BIT(8));
 	}
 
 	val = phy_read(phydev, DP83867_CFG3);

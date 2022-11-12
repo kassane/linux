@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/iommu/allwinner,sun50i-h6-iommu.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Allwinner H6 IOMMU Device Tree Bindings
+title: Allwinner H6 IOMMU
 
 maintainers:
   - Chen-Yu Tsai <wens@csie.org>
@@ -17,7 +17,9 @@ properties:
       The content of the cell is the master ID.
 
   compatible:
-    const: allwinner,sun50i-h6-iommu
+    enum:
+      - allwinner,sun20i-d1-iommu
+      - allwinner,sun50i-h6-iommu
 
   reg:
     maxItems: 1
@@ -37,7 +39,17 @@ required:
   - reg
   - interrupts
   - clocks
-  - resets
+
+if:
+  properties:
+    compatible:
+      contains:
+        enum:
+          - allwinner,sun50i-h6-iommu
+
+then:
+  required:
+    - resets
 
 additionalProperties: false
 

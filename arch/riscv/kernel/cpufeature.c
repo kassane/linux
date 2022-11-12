@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <asm/alternative.h>
+#include <asm/cacheflush.h>
 #include <asm/errata_list.h>
 #include <asm/hwcap.h>
 #include <asm/patch.h>
@@ -27,7 +28,7 @@ unsigned long elf_hwcap __read_mostly;
 /* Host ISA bitmap */
 static DECLARE_BITMAP(riscv_isa, RISCV_ISA_EXT_MAX) __read_mostly;
 
-__ro_after_init DEFINE_STATIC_KEY_ARRAY_FALSE(riscv_isa_ext_keys, RISCV_ISA_EXT_KEY_MAX);
+DEFINE_STATIC_KEY_ARRAY_FALSE(riscv_isa_ext_keys, RISCV_ISA_EXT_KEY_MAX);
 EXPORT_SYMBOL(riscv_isa_ext_keys);
 
 /**
@@ -200,6 +201,10 @@ void __init riscv_fill_hwcap(void)
 			} else {
 				SET_ISA_EXT_MAP("sscofpmf", RISCV_ISA_EXT_SSCOFPMF);
 				SET_ISA_EXT_MAP("svpbmt", RISCV_ISA_EXT_SVPBMT);
+				SET_ISA_EXT_MAP("zicbom", RISCV_ISA_EXT_ZICBOM);
+				SET_ISA_EXT_MAP("zihintpause", RISCV_ISA_EXT_ZIHINTPAUSE);
+				SET_ISA_EXT_MAP("sstc", RISCV_ISA_EXT_SSTC);
+				SET_ISA_EXT_MAP("svinval", RISCV_ISA_EXT_SVINVAL);
 			}
 #undef SET_ISA_EXT_MAP
 		}
@@ -249,16 +254,28 @@ void __init riscv_fill_hwcap(void)
 #ifdef CONFIG_RISCV_ALTERNATIVE
 static bool __init_or_module cpufeature_probe_svpbmt(unsigned int stage)
 {
-#ifdef CONFIG_RISCV_ISA_SVPBMT
-	switch (stage) {
-	case RISCV_ALTERNATIVES_EARLY_BOOT:
+	if (!IS_ENABLED(CONFIG_RISCV_ISA_SVPBMT))
 		return false;
-	default:
-		return riscv_isa_extension_available(NULL, SVPBMT);
-	}
-#endif
 
-	return false;
+	if (stage == RISCV_ALTERNATIVES_EARLY_BOOT)
+		return false;
+
+	return riscv_isa_extension_available(NULL, SVPBMT);
+}
+
+static bool __init_or_module cpufeature_probe_zicbom(unsigned int stage)
+{
+	if (!IS_ENABLED(CONFIG_RISCV_ISA_ZICBOM))
+		return false;
+
+	if (stage == RISCV_ALTERNATIVES_EARLY_BOOT)
+		return false;
+
+	if (!riscv_isa_extension_available(NULL, ZICBOM))
+		return false;
+
+	riscv_noncoherent_supported();
+	return true;
 }
 
 /*
@@ -273,7 +290,10 @@ static u32 __init_or_module cpufeature_probe(unsigned int stage)
 	u32 cpu_req_feature = 0;
 
 	if (cpufeature_probe_svpbmt(stage))
-		cpu_req_feature |= (1U << CPUFEATURE_SVPBMT);
+		cpu_req_feature |= BIT(CPUFEATURE_SVPBMT);
+
+	if (cpufeature_probe_zicbom(stage))
+		cpu_req_feature |= BIT(CPUFEATURE_ZICBOM);
 
 	return cpu_req_feature;
 }

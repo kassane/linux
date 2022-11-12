@@ -28,6 +28,7 @@
 #include "util/parse-events-hybrid.h"
 #include "util/pmu-hybrid.h"
 #include "tracepoint.h"
+#include "thread_map.h"
 
 #define MAX_NAME_LEN 100
 
@@ -149,13 +150,43 @@ struct event_symbol event_symbols_sw[PERF_COUNT_SW_MAX] = {
 	},
 };
 
-#define __PERF_EVENT_FIELD(config, name) \
-	((config & PERF_EVENT_##name##_MASK) >> PERF_EVENT_##name##_SHIFT)
+bool is_event_supported(u8 type, u64 config)
+{
+	bool ret = true;
+	int open_return;
+	struct evsel *evsel;
+	struct perf_event_attr attr = {
+		.type = type,
+		.config = config,
+		.disabled = 1,
+	};
+	struct perf_thread_map *tmap = thread_map__new_by_tid(0);
 
-#define PERF_EVENT_RAW(config)		__PERF_EVENT_FIELD(config, RAW)
-#define PERF_EVENT_CONFIG(config)	__PERF_EVENT_FIELD(config, CONFIG)
-#define PERF_EVENT_TYPE(config)		__PERF_EVENT_FIELD(config, TYPE)
-#define PERF_EVENT_ID(config)		__PERF_EVENT_FIELD(config, EVENT)
+	if (tmap == NULL)
+		return false;
+
+	evsel = evsel__new(&attr);
+	if (evsel) {
+		open_return = evsel__open(evsel, NULL, tmap);
+		ret = open_return >= 0;
+
+		if (open_return == -EACCES) {
+			/*
+			 * This happens if the paranoid value
+			 * /proc/sys/kernel/perf_event_paranoid is set to 2
+			 * Re-run with exclude_kernel set; we don't do that
+			 * by default as some ARM machines do not support it.
+			 *
+			 */
+			evsel->core.attr.exclude_kernel = 1;
+			ret = evsel__open(evsel, NULL, tmap) >= 0;
+		}
+		evsel__delete(evsel);
+	}
+
+	perf_thread_map__put(tmap);
+	return ret;
+}
 
 const char *event_type(int type)
 {
@@ -214,6 +245,9 @@ __add_event(struct list_head *list, int *idx,
 	struct evsel *evsel;
 	struct perf_cpu_map *cpus = pmu ? perf_cpu_map__get(pmu->cpus) :
 			       cpu_list ? perf_cpu_map__new(cpu_list) : NULL;
+
+	if (pmu)
+		perf_pmu__warn_invalid_formats(pmu);
 
 	if (pmu && attr->type == PERF_TYPE_RAW)
 		perf_pmu__warn_invalid_config(pmu, attr->config, name);
@@ -2240,6 +2274,17 @@ int __parse_events(struct evlist *evlist, const char *str,
 	return ret;
 }
 
+int parse_event(struct evlist *evlist, const char *str)
+{
+	struct parse_events_error err;
+	int ret;
+
+	parse_events_error__init(&err);
+	ret = parse_events(evlist, str, &err);
+	parse_events_error__exit(&err);
+	return ret;
+}
+
 void parse_events_error__init(struct parse_events_error *err)
 {
 	bzero(err, sizeof(*err));
@@ -2256,10 +2301,8 @@ void parse_events_error__exit(struct parse_events_error *err)
 void parse_events_error__handle(struct parse_events_error *err, int idx,
 				char *str, char *help)
 {
-	if (WARN(!str, "WARNING: failed to provide error string\n")) {
-		free(help);
-		return;
-	}
+	if (WARN(!str || !err, "WARNING: failed to provide error string or struct\n"))
+		goto out_free;
 	switch (err->num_errors) {
 	case 0:
 		err->idx = idx;
@@ -2284,6 +2327,11 @@ void parse_events_error__handle(struct parse_events_error *err, int idx,
 		break;
 	}
 	err->num_errors++;
+	return;
+
+out_free:
+	free(str);
+	free(help);
 }
 
 #define MAX_WIDTH 1000

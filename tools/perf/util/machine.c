@@ -236,6 +236,7 @@ void machine__exit(struct machine *machine)
 	zfree(&machine->root_dir);
 	zfree(&machine->mmap_name);
 	zfree(&machine->current_tid);
+	zfree(&machine->kallsyms_filename);
 
 	for (i = 0; i < THREADS__TABLE_SIZE; i++) {
 		struct threads *threads = &machine->threads[i];
@@ -1126,10 +1127,6 @@ static struct dso *machine__get_kernel(struct machine *machine)
 
 	return kernel;
 }
-
-struct process_args {
-	u64 start;
-};
 
 void machine__get_kallsyms_filename(struct machine *machine, char *buf,
 				    size_t bufsz)
