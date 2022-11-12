@@ -85,7 +85,7 @@ static struct io_poll *io_poll_get_double(struct io_kiocb *req)
 static struct io_poll *io_poll_get_single(struct io_kiocb *req)
 {
 	if (req->opcode == IORING_OP_POLL_ADD)
-		return io_kiocb_to_cmd(req);
+		return io_kiocb_to_cmd(req, struct io_poll);
 	return &req->apoll->poll;
 }
 
@@ -115,6 +115,8 @@ static void io_poll_req_insert_locked(struct io_kiocb *req)
 {
 	struct io_hash_table *table = &req->ctx->cancel_table_locked;
 	u32 index = hash_long(req->cqe.user_data, table->hash_bits);
+
+	lockdep_assert_held(&req->ctx->uring_lock);
 
 	hlist_add_head(&req->hash_node, &table->hbs[index].list);
 }
@@ -274,7 +276,7 @@ static void io_poll_task_func(struct io_kiocb *req, bool *locked)
 		return;
 
 	if (ret == IOU_POLL_DONE) {
-		struct io_poll *poll = io_kiocb_to_cmd(req);
+		struct io_poll *poll = io_kiocb_to_cmd(req, struct io_poll);
 		req->cqe.res = mangle_poll(req->cqe.res & poll->events);
 	} else if (ret != IOU_POLL_REMOVE_POLL_USE_RES) {
 		req->cqe.res = ret;
@@ -394,7 +396,8 @@ static int io_poll_wake(struct wait_queue_entry *wait, unsigned mode, int sync,
 	return 1;
 }
 
-static void io_poll_double_prepare(struct io_kiocb *req)
+/* fails only when polling is already completing by the first entry */
+static bool io_poll_double_prepare(struct io_kiocb *req)
 {
 	struct wait_queue_head *head;
 	struct io_poll *poll = io_poll_get_single(req);
@@ -403,20 +406,20 @@ static void io_poll_double_prepare(struct io_kiocb *req)
 	rcu_read_lock();
 	head = smp_load_acquire(&poll->head);
 	/*
-	 * poll arm may not hold ownership and so race with
-	 * io_poll_wake() by modifying req->flags. There is only one
-	 * poll entry queued, serialise with it by taking its head lock.
+	 * poll arm might not hold ownership and so race for req->flags with
+	 * io_poll_wake(). There is only one poll entry queued, serialise with
+	 * it by taking its head lock. As we're still arming the tw hanlder
+	 * is not going to be run, so there are no races with it.
 	 */
-	if (head)
+	if (head) {
 		spin_lock_irq(&head->lock);
-
-	req->flags |= REQ_F_DOUBLE_POLL;
-	if (req->opcode == IORING_OP_POLL_ADD)
-		req->flags |= REQ_F_ASYNC_DATA;
-
-	if (head)
+		req->flags |= REQ_F_DOUBLE_POLL;
+		if (req->opcode == IORING_OP_POLL_ADD)
+			req->flags |= REQ_F_ASYNC_DATA;
 		spin_unlock_irq(&head->lock);
+	}
 	rcu_read_unlock();
+	return !!head;
 }
 
 static void __io_queue_proc(struct io_poll *poll, struct io_poll_table *pt,
@@ -454,7 +457,11 @@ static void __io_queue_proc(struct io_poll *poll, struct io_poll_table *pt,
 		/* mark as double wq entry */
 		wqe_private |= IO_WQE_F_DOUBLE;
 		io_init_poll_iocb(poll, first->events, first->wait.func);
-		io_poll_double_prepare(req);
+		if (!io_poll_double_prepare(req)) {
+			/* the request is completing, just back off */
+			kfree(poll);
+			return;
+		}
 		*poll_ptr = poll;
 	} else {
 		/* fine to modify, there is no poll queued to race with us */
@@ -475,7 +482,7 @@ static void io_poll_queue_proc(struct file *file, struct wait_queue_head *head,
 			       struct poll_table_struct *p)
 {
 	struct io_poll_table *pt = container_of(p, struct io_poll_table, pt);
-	struct io_poll *poll = io_kiocb_to_cmd(pt->req);
+	struct io_poll *poll = io_kiocb_to_cmd(pt->req, struct io_poll);
 
 	__io_queue_proc(poll, pt, head,
 			(struct io_poll **) &pt->req->async_data);
@@ -821,7 +828,7 @@ static __poll_t io_poll_parse_events(const struct io_uring_sqe *sqe,
 
 int io_poll_remove_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 {
-	struct io_poll_update *upd = io_kiocb_to_cmd(req);
+	struct io_poll_update *upd = io_kiocb_to_cmd(req, struct io_poll_update);
 	u32 flags;
 
 	if (sqe->buf_index || sqe->splice_fd_in)
@@ -851,13 +858,13 @@ int io_poll_remove_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 
 int io_poll_add_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 {
-	struct io_poll *poll = io_kiocb_to_cmd(req);
+	struct io_poll *poll = io_kiocb_to_cmd(req, struct io_poll);
 	u32 flags;
 
 	if (sqe->buf_index || sqe->off || sqe->addr)
 		return -EINVAL;
 	flags = READ_ONCE(sqe->len);
-	if (flags & ~(IORING_POLL_ADD_MULTI|IORING_POLL_ADD_LEVEL))
+	if (flags & ~IORING_POLL_ADD_MULTI)
 		return -EINVAL;
 	if ((flags & IORING_POLL_ADD_MULTI) && (req->flags & REQ_F_CQE_SKIP))
 		return -EINVAL;
@@ -868,7 +875,7 @@ int io_poll_add_prep(struct io_kiocb *req, const struct io_uring_sqe *sqe)
 
 int io_poll_add(struct io_kiocb *req, unsigned int issue_flags)
 {
-	struct io_poll *poll = io_kiocb_to_cmd(req);
+	struct io_poll *poll = io_kiocb_to_cmd(req, struct io_poll);
 	struct io_poll_table ipt;
 	int ret;
 
@@ -891,7 +898,7 @@ int io_poll_add(struct io_kiocb *req, unsigned int issue_flags)
 
 int io_poll_remove(struct io_kiocb *req, unsigned int issue_flags)
 {
-	struct io_poll_update *poll_update = io_kiocb_to_cmd(req);
+	struct io_poll_update *poll_update = io_kiocb_to_cmd(req, struct io_poll_update);
 	struct io_cancel_data cd = { .data = poll_update->old_user_data, };
 	struct io_ring_ctx *ctx = req->ctx;
 	struct io_hash_bucket *bucket;
@@ -930,7 +937,7 @@ found:
 	if (poll_update->update_events || poll_update->update_user_data) {
 		/* only mask one event flags, keep behavior flags */
 		if (poll_update->update_events) {
-			struct io_poll *poll = io_kiocb_to_cmd(preq);
+			struct io_poll *poll = io_kiocb_to_cmd(preq, struct io_poll);
 
 			poll->events &= ~0xffff;
 			poll->events |= poll_update->events & 0xffff;

@@ -445,6 +445,9 @@ static int evsel__check_attr(struct evsel *evsel, struct perf_session *session)
 	struct perf_event_attr *attr = &evsel->core.attr;
 	bool allow_user_set;
 
+	if (evsel__is_dummy_event(evsel))
+		return 0;
+
 	if (perf_header__has_feat(&session->header, HEADER_STAT))
 		return 0;
 
@@ -566,6 +569,8 @@ static struct evsel *find_first_output_type(struct evlist *evlist,
 	struct evsel *evsel;
 
 	evlist__for_each_entry(evlist, evsel) {
+		if (evsel__is_dummy_event(evsel))
+			continue;
 		if (output_type(evsel->core.attr.type) == (int)type)
 			return evsel;
 	}
@@ -877,7 +882,7 @@ static int print_bstack_flags(FILE *fp, struct branch_entry *br)
 		       br->flags.in_tx ? 'X' : '-',
 		       br->flags.abort ? 'A' : '-',
 		       br->flags.cycles,
-		       br->flags.type ? branch_type_name(br->flags.type) : "-");
+		       get_branch_type(br));
 }
 
 static int perf_sample__fprintf_brstack(struct perf_sample *sample,
@@ -2237,9 +2242,6 @@ static void __process_stat(struct evsel *counter, u64 tstamp)
 	int idx, thread;
 	struct perf_cpu cpu;
 	static int header_printed;
-
-	if (counter->core.system_wide)
-		nthreads = 1;
 
 	if (!header_printed) {
 		printf("%3s %8s %15s %15s %15s %15s %s\n",
@@ -3844,9 +3846,10 @@ int cmd_script(int argc, const char **argv)
 		     "Valid types: hw,sw,trace,raw,synth. "
 		     "Fields: comm,tid,pid,time,cpu,event,trace,ip,sym,dso,"
 		     "addr,symoff,srcline,period,iregs,uregs,brstack,"
-		     "brstacksym,flags,bpf-output,brstackinsn,brstackinsnlen,brstackoff,"
-		     "callindent,insn,insnlen,synth,phys_addr,metric,misc,ipc,tod,"
-		     "data_page_size,code_page_size,ins_lat",
+		     "brstacksym,flags,data_src,weight,bpf-output,brstackinsn,"
+		     "brstackinsnlen,brstackoff,callindent,insn,insnlen,synth,"
+		     "phys_addr,metric,misc,srccode,ipc,tod,data_page_size,"
+		     "code_page_size,ins_lat",
 		     parse_output_fields),
 	OPT_BOOLEAN('a', "all-cpus", &system_wide,
 		    "system-wide collection from all CPUs"),
@@ -3861,7 +3864,7 @@ int cmd_script(int argc, const char **argv)
 	OPT_CALLBACK_OPTARG(0, "xed", NULL, NULL, NULL,
 			"Run xed disassembler on output", parse_xed),
 	OPT_CALLBACK_OPTARG(0, "call-trace", &itrace_synth_opts, NULL, NULL,
-			"Decode calls from from itrace", parse_call_trace),
+			"Decode calls from itrace", parse_call_trace),
 	OPT_CALLBACK_OPTARG(0, "call-ret-trace", &itrace_synth_opts, NULL, NULL,
 			"Decode calls and returns from itrace", parse_callret_trace),
 	OPT_STRING(0, "graph-function", &symbol_conf.graph_function, "symbol[,symbol...]",
